@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Allied Vision ROI Streamer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="layout">
+    <!-- Left Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-inner">
+        <h1 class="app-title">AVT Streamer</h1>
+
+        <section class="panel">
+          <h2>Camera</h2>
+          <label class="row space">
+            <span>Enabled</span>
+            <input id="cameraToggle" type="checkbox" />
+          </label>
+          <button id="saveBtn" class="primary">Save Data</button>
+        </section>
+
+        <section class="panel">
+          <h2>Exposure (µs)</h2>
+          <div class="row space">
+            <input id="expSlider" type="range" min="1000" max="50000" step="1000" />
+            <span id="expLabel" class="mono">-</span>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Colormap</h2>
+          <select id="colormapSelect">
+            <option value="grey">grey</option>
+            <option value="jet">jet</option>
+            <option value="cubiczero">cubiczero</option>
+          </select>
+        </section>
+
+        <section class="panel">
+          <h2>ROIs</h2>
+          <div id="roiHint" class="hint">Add by dragging on the live view. Drag to move. Resize using handles.</div>
+          <div id="roiList" class="roi-list"></div>
+        </section>
+      </div>
+    </aside>
+
+    <!-- Right Workspace -->
+    <main class="workspace">
+      <!-- Live View -->
+      <section class="work-panel">
+        <div class="panel-header">
+          <h2>Live View</h2>
+          <div class="stats mono">
+            <span id="statsExposure">exp: -</span>
+            <span id="statsFps">fps: -</span>
+          </div>
+        </div>
+        <div id="liveContainer" class="live-container">
+          <img id="stream" alt="Stream" src="/video_feed" />
+          <canvas id="roiOverlay"></canvas>
+        </div>
+      </section>
+
+      <!-- Bar Plot -->
+      <section id="barPanel" class="work-panel" hidden>
+        <div class="panel-header">
+          <h2>ROI Integrations</h2>
+        </div>
+        <div class="bar-container">
+          <img id="barStream" alt="Bar Plot" src="/bar_feed" />
+        </div>
+      </section>
+
+      <!-- ROI Streams Grid -->
+      <section id="roiGridPanel" class="work-panel" hidden>
+        <div class="panel-header">
+          <h2>ROI Streams</h2>
+        </div>
+        <div id="roiGrid" class="roi-grid"></div>
+      </section>
+    </main>
+  </div>
+
+  <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
