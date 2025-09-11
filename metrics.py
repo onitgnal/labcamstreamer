@@ -176,13 +176,6 @@ class MetricsComputer:
                 current_max = self._y_max_integral.get(m.id, m.value_per_ms)
                 self._y_max_integral[m.id] = max(current_max, m.value_per_ms)
 
-            # Prune stale ROIs from max tracking, which can happen if an ROI is deleted
-            active_roi_ids = {m.id for m in roi_metrics}
-            stale_ids = [k for k in self._y_max_integral if k not in active_roi_ids]
-            for rid in stale_ids:
-                if rid in self._y_max_integral:
-                    del self._y_max_integral[rid]
-
             self._snapshot = {
                 "timestamp": now,
                 "fps": float(fps),
