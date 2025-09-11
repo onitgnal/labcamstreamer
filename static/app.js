@@ -41,7 +41,9 @@
 
   // ----- REST helpers -----
   async function getJSON(url) {
-    const res = await fetch(url, { cache: 'no-store' });
+    const cacheBustUrl = new URL(url, window.location.origin);
+    cacheBustUrl.searchParams.set('t', Date.now());
+    const res = await fetch(cacheBustUrl.href, { cache: 'no-store' });
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   }
