@@ -47,6 +47,7 @@ def setup_logging(debug_mode=False):
 cam_service = CameraService()
 roi_registry = ROIRegistry()
 metrics = MetricsComputer()
+_plot_lock = threading.Lock()
 
 # Background metrics loop
 def _metrics_loop():
@@ -253,16 +254,18 @@ def _bar_frames() -> Generator[bytes, None, None]:
         labels = [r["id"] for r in rois]
         values = [float(r["value_per_ms"]) for r in rois]
 
-        fig, ax = plt.subplots(figsize=(6.4, 2.4), dpi=100)
-        ax.bar(labels, values, color="#4a90e2")
-        ax.set_ylabel("integration / ms")
-        ax.set_title(f"Exposure: {exp} µs   FPS: {fps:.1f}")
-        ax.grid(axis="y", linestyle="--", alpha=0.3)
-        fig.tight_layout()
-        buf = io.BytesIO()
-        fig.canvas.print_png(buf)
-        plt.close(fig)
-        img = cv2.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
+        with _plot_lock:
+            fig, ax = plt.subplots(figsize=(6.4, 2.4), dpi=100)
+            ax.bar(labels, values, color="#4a90e2")
+            ax.set_ylabel("integration / ms")
+            ax.set_title(f"Exposure: {exp} µs   FPS: {fps:.1f}")
+            ax.grid(axis="y", linestyle="--", alpha=0.3)
+            fig.tight_layout()
+            buf = io.BytesIO()
+            fig.canvas.print_png(buf)
+            plt.close(fig)
+            img = cv2.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
+
         jpg = _encode_jpeg(img) if img is not None else None
         if jpg:
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
@@ -323,17 +326,18 @@ def _roi_integration_frames(rid: str) -> Generator[bytes, None, None]:
             img = _placeholder(f"ROI {rid} not found", (320, 240))
         else:
             value_per_ms = roi_metric.get("value_per_ms", 0.0)
-            fig, ax = plt.subplots(figsize=(3.2, 2.4), dpi=100)
-            ax.bar(["value"], [value_per_ms], color="#4a90e2")
-            ax.set_ylim(0, max(1.0, 1.1 * y_max))
-            ax.set_ylabel("integration / ms")
-            ax.set_title(f"ROI {rid} Integration")
-            ax.grid(axis="y", linestyle="--", alpha=0.7)
-            fig.tight_layout()
-            buf = io.BytesIO()
-            fig.canvas.print_png(buf)
-            plt.close(fig)
-            img = cv2.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
+            with _plot_lock:
+                fig, ax = plt.subplots(figsize=(3.2, 2.4), dpi=100)
+                ax.bar(["value"], [value_per_ms], color="#4a90e2")
+                ax.set_ylim(0, max(1.0, 1.1 * y_max))
+                ax.set_ylabel("integration / ms")
+                ax.set_title(f"ROI {rid} Integration")
+                ax.grid(axis="y", linestyle="--", alpha=0.7)
+                fig.tight_layout()
+                buf = io.BytesIO()
+                fig.canvas.print_png(buf)
+                plt.close(fig)
+                img = cv2.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
         jpg = _encode_jpeg(img) if img is not None else None
         if jpg:
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"

@@ -71,7 +71,8 @@
   async function del(url) {
     const res = await fetch(url, { method:'DELETE' });
     if (!res.ok) throw new Error(await res.text());
-    return res.json();
+    // Do not attempt to parse a JSON body, as there may not be one.
+    return;
   }
   async function resetMax(roiId) {
     try {
