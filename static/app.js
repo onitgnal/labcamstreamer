@@ -263,51 +263,44 @@
   }
 
   function renderPerRoiPanels() {
-    const ids = state.rois.map(r => r.id);
-    for (const child of Array.from(perRoiGrid.children)) {
-      const id = child.getAttribute('data-roi');
-      if (!ids.includes(id)) child.remove();
-    }
+    perRoiGrid.innerHTML = ''; // Clear the container
     for (const r of state.rois) {
-      let card = perRoiGrid.querySelector(`.per-roi-card[data-roi="${r.id}"]`);
-      if (!card) {
-        card = document.createElement('div');
-        card.className = 'per-roi-card';
-        card.setAttribute('data-roi', r.id);
+      const card = document.createElement('div');
+      card.className = 'per-roi-card';
+      card.setAttribute('data-roi', r.id);
 
-        const header = document.createElement('div');
-        header.className = 'header';
-        header.innerHTML = `<span class="title">${r.id}</span><span class="dims">${r.w}x${r.h}</span>`;
+      const header = document.createElement('div');
+      header.className = 'header';
+      header.innerHTML = `<span class="title">${r.id}</span><span class="dims">${r.w}x${r.h}</span>`;
 
-        const plots = document.createElement('div');
-        plots.className = 'plots';
+      const plots = document.createElement('div');
+      plots.className = 'plots';
 
-        const profileImg = document.createElement('img');
-        profileImg.className = 'roi-profile';
-        profileImg.alt = `Profile ${r.id}`;
-        profileImg.src = `/roi_profile_feed/${encodeURIComponent(r.id)}`;
+      const profileImg = document.createElement('img');
+      profileImg.className = 'roi-profile';
+      profileImg.alt = `Profile ${r.id}`;
+      profileImg.src = `/roi_profile_feed/${encodeURIComponent(r.id)}`;
 
-        const integrationImg = document.createElement('img');
-        integrationImg.className = 'roi-integration';
-        integrationImg.alt = `Integration ${r.id}`;
-        integrationImg.src = `/roi_integration_feed/${encodeURIComponent(r.id)}`;
+      const integrationImg = document.createElement('img');
+      integrationImg.className = 'roi-integration';
+      integrationImg.alt = `Integration ${r.id}`;
+      integrationImg.src = `/roi_integration_feed/${encodeURIComponent(r.id)}`;
 
-        plots.appendChild(profileImg);
-        plots.appendChild(integrationImg);
+      plots.appendChild(profileImg);
+      plots.appendChild(integrationImg);
 
-        const toolbar = document.createElement('div');
-        toolbar.className = 'toolbar';
-        const resetBtn = document.createElement('button');
-        resetBtn.textContent = 'Reset Max';
-        resetBtn.onclick = () => resetMax(r.id);
-        toolbar.appendChild(resetBtn);
+      const toolbar = document.createElement('div');
+      toolbar.className = 'toolbar';
+      const resetBtn = document.createElement('button');
+      resetBtn.textContent = 'Reset Max';
+      resetBtn.onclick = () => resetMax(r.id);
+      toolbar.appendChild(resetBtn);
 
-        card.appendChild(header);
-        card.appendChild(plots);
-        card.appendChild(toolbar);
+      card.appendChild(header);
+      card.appendChild(plots);
+      card.appendChild(toolbar);
 
-        perRoiGrid.appendChild(card);
-      }
+      perRoiGrid.appendChild(card);
     }
   }
 
