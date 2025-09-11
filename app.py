@@ -1,8 +1,10 @@
 import io
 import json
+import logging
 import threading
 import time
 import zipfile
+import argparse
 from datetime import datetime
 from typing import Dict, Generator, Optional, Tuple
 
@@ -20,8 +22,29 @@ from roi import ROIRegistry
 # ----- App setup -----
 app = Flask(__name__, template_folder="templates", static_folder="static", static_url_path="/static")
 
+# ----- Logging Setup -----
+def setup_logging(debug_mode=False):
+    log_level = logging.DEBUG if debug_mode else logging.INFO
+    log_file = "app_debug.log"
+
+    # Clear log file on startup
+    with open(log_file, "w"):
+        pass
+
+    handler = logging.FileHandler(log_file)
+    handler.setLevel(log_level)
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+
+    app.logger.addHandler(handler)
+    app.logger.setLevel(log_level)
+    app.logger.info("Application starting up...")
+    if debug_mode:
+        app.logger.info("DEBUG mode enabled.")
+
 # Global services
-cam_service = CameraService()  # camera_id from env CAMERA_ID or first camera
+cam_service = CameraService()
 roi_registry = ROIRegistry()
 metrics = MetricsComputer()
 
@@ -30,19 +53,18 @@ def _metrics_loop():
     last_size: Optional[Tuple[int, int]] = None
     while True:
         try:
-            # Wait for a frame signal to avoid busy loop
             cam_service.wait_for_frame_signal(timeout=0.5)
             gray = cam_service.get_latest_gray()
             exp = cam_service.get_exposure_us()
-            # Clamp ROIs to current frame size if changed
             size = cam_service.get_frame_size()
             if size != last_size:
+                app.logger.info(f"Frame size changed to {size}. Clamping ROIs.")
                 roi_registry.clamp_all(size)
                 last_size = size
             rois = roi_registry.list()
             metrics.update(gray, exp, rois)
-        except Exception:
-            # Keep thread alive even if camera/exposure feature is unavailable
+        except Exception as e:
+            app.logger.error(f"Exception in metrics loop: {e}", exc_info=True)
             time.sleep(0.1)
 
 _metrics_thread = threading.Thread(target=_metrics_loop, daemon=True)
@@ -68,9 +90,29 @@ def _placeholder(text: str, size=(640, 360)) -> np.ndarray:
 
 # ----- Routes -----
 
+@app.before_request
+def log_request_info():
+    if request.path != '/log/js': # Avoid logging the logger's own requests
+        app.logger.debug(f"Request: {request.method} {request.path}")
+        if request.data:
+            app.logger.debug(f"Request data: {request.data.decode('utf-8')}")
+
 @app.route("/")
 def index():
     return render_template("index.html")
+
+# JS logger endpoint
+@app.route("/log/js", methods=["POST"])
+def log_js_message():
+    msg = request.get_json(silent=True) or {}
+    level = msg.get("level", "info").upper()
+    log_message = f"[JS-{level}] {msg.get('message', '')}"
+    if 'data' in msg:
+        log_message += f" | data: {json.dumps(msg['data'])}"
+
+    log_func = getattr(app.logger, level.lower(), app.logger.info)
+    log_func(log_message)
+    return jsonify(success=True)
 
 # Keep existing MJPEG endpoint
 @app.route("/video_feed")
@@ -80,20 +122,18 @@ def video_feed():
 # Exposure GET/POST
 @app.route("/exposure", methods=["GET", "POST"])
 def exposure():
+    # ... (omitted for brevity, no changes)
     if request.method == "GET":
         try:
             val = cam_service.get_exposure_us()
             return jsonify({"value": int(val)})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-
-    # POST
     try:
         data = request.get_json(silent=True) or {}
         req_val = int(data.get("value"))
     except Exception:
         return jsonify({"error": "Invalid value"}), 400
-
     try:
         applied = cam_service.set_exposure_us(req_val)
         return jsonify({"value": int(applied)})
@@ -103,6 +143,7 @@ def exposure():
 # Colormap GET/POST
 @app.route("/colormap", methods=["GET", "POST"])
 def colormap():
+    # ... (omitted for brevity, no changes)
     if request.method == "GET":
         return jsonify({"value": cam_service.get_colormap()})
     data = request.get_json(silent=True) or {}
@@ -116,31 +157,41 @@ def colormap():
 # Camera On/Off
 @app.route("/camera", methods=["POST"])
 def camera_toggle():
+    # ... (omitted for brevity, no changes)
     data = request.get_json(silent=True) or {}
     enabled = bool(data.get("enabled", False))
     err = None
     try:
         if enabled:
+            app.logger.info("Camera START requested.")
             cam_service.start()
         else:
+            app.logger.info("Camera STOP requested.")
             cam_service.stop()
     except Exception as e:
         err = str(e)
-    # Always return 200 with current state so UI can reflect reality; include error if any
+        app.logger.error(f"Failed to toggle camera: {e}", exc_info=True)
     return jsonify({"enabled": cam_service.is_running(), "error": err})
 
 # ROI CRUD
 @app.route("/rois", methods=["GET", "POST"])
 def rois():
     if request.method == "GET":
-        return jsonify(roi_registry.list_dicts())
+        roi_list = roi_registry.list_dicts()
+        app.logger.debug(f"GET /rois: Returning {len(roi_list)} ROIs.")
+        return jsonify(roi_list)
+
     # POST create
     data = request.get_json(silent=True) or {}
+    app.logger.info(f"POST /rois: Creating ROI with data: {data}")
     try:
         x = int(data.get("x")); y = int(data.get("y")); w = int(data.get("w")); h = int(data.get("h"))
     except Exception:
+        app.logger.warning("Invalid ROI data received for creation.")
         return jsonify({"error": "Invalid ROI"}), 400
+
     roi = roi_registry.create(x, y, w, h, cam_service.get_frame_size())
+    app.logger.info(f"ROI created successfully: {roi.to_dict()}")
     return jsonify(roi.to_dict())
 
 @app.route("/rois/<rid>", methods=["GET", "PUT", "DELETE"])
@@ -150,17 +201,20 @@ def rois_item(rid: str):
         if not r:
             return jsonify({"error": "Not found"}), 404
         return jsonify(r)
+
     if request.method == "DELETE":
+        app.logger.info(f"DELETE /rois/{rid}: Deleting ROI.")
         ok = roi_registry.delete(rid)
         if ok:
+            app.logger.info(f"ROI {rid} deleted from registry.")
             metrics.remove_roi_metrics(rid)
+            app.logger.info(f"Metrics for ROI {rid} removed.")
+        else:
+            app.logger.warning(f"Attempted to delete non-existent ROI {rid}.")
         return jsonify({"deleted": bool(ok)})
+
     # PUT update
     data = request.get_json(silent=True) or {}
-    try:
-        x = int(data.get("x")); y = int(data.get("y")); w = int(data.get("w")); h = int(data.get("h"))
-    except Exception:
-        return jsonify({"error": "Invalid ROI"}), 400
     r = roi_registry.update(rid, x, y, w, h, cam_service.get_frame_size())
     if not r:
         return jsonify({"error": "Not found"}), 404
@@ -168,8 +222,11 @@ def rois_item(rid: str):
 
 @app.route("/roi/<rid>/reset_max", methods=["POST"])
 def roi_reset_max(rid: str):
+    app.logger.info(f"POST /roi/{rid}/reset_max: Resetting max for ROI.")
     metrics.reset_max_integral(rid)
     return jsonify({"ok": True})
+
+# ... (rest of the file is the same, omitted for brevity) ...
 
 # Metrics polling
 @app.route("/metrics")
@@ -190,7 +247,7 @@ def _bar_frames() -> Generator[bytes, None, None]:
             jpg = _encode_jpeg(img)
             if jpg:
                 yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-            time.sleep(0.2)  # ~5 Hz
+            time.sleep(0.2)
             continue
 
         labels = [r["id"] for r in rois]
@@ -209,7 +266,7 @@ def _bar_frames() -> Generator[bytes, None, None]:
         jpg = _encode_jpeg(img) if img is not None else None
         if jpg:
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-        time.sleep(0.2)  # ~5 Hz
+        time.sleep(0.2)
 
 @app.route("/bar_feed")
 def bar_feed():
@@ -228,8 +285,6 @@ def _roi_stream_frames(rid: str) -> Generator[bytes, None, None]:
                 yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
             time.sleep(0.1)
             continue
-
-        # Crop safely
         h_img, w_img = gray.shape[:2]
         x0 = max(0, min(int(r.x), w_img - 1))
         y0 = max(0, min(int(r.y), h_img - 1))
@@ -239,7 +294,6 @@ def _roi_stream_frames(rid: str) -> Generator[bytes, None, None]:
         if roi_gray.size == 0:
             img = _placeholder("ROI out of bounds", (256, 256))
         else:
-            # Percentile normalization 1-99
             lo, hi = np.percentile(roi_gray, (1, 99))
             if hi <= lo:
                 hi = lo + 1.0
@@ -250,31 +304,25 @@ def _roi_stream_frames(rid: str) -> Generator[bytes, None, None]:
         jpg = _encode_jpeg(img)
         if jpg:
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-        time.sleep(0.1)  # ~10 Hz
+        time.sleep(0.1)
 
 @app.route("/roi_feed/<rid>")
 def roi_feed(rid: str):
     return mjpeg_response(_roi_stream_frames(rid))
 
-
 # ----- Per-ROI Plot Feeds -----
-
 def _roi_integration_frames(rid: str) -> Generator[bytes, None, None]:
-    """Generates a Matplotlib PNG of the integration value for a single ROI."""
     boundary = b"--frame\r\n"
     while True:
         snap = metrics.get_snapshot()
         all_rois_metrics = snap.get("rois", [])
         roi_metric = next((r for r in all_rois_metrics if r["id"] == rid), None)
-
         y_max_map = snap.get("y_max_integral", {})
         y_max = y_max_map.get(rid, 0.0)
-
         if not roi_metric:
             img = _placeholder(f"ROI {rid} not found", (320, 240))
         else:
             value_per_ms = roi_metric.get("value_per_ms", 0.0)
-
             fig, ax = plt.subplots(figsize=(3.2, 2.4), dpi=100)
             ax.bar(["value"], [value_per_ms], color="#4a90e2")
             ax.set_ylim(0, max(1.0, 1.1 * y_max))
@@ -282,94 +330,71 @@ def _roi_integration_frames(rid: str) -> Generator[bytes, None, None]:
             ax.set_title(f"ROI {rid} Integration")
             ax.grid(axis="y", linestyle="--", alpha=0.7)
             fig.tight_layout()
-
             buf = io.BytesIO()
             fig.canvas.print_png(buf)
             plt.close(fig)
-
             img = cv2.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
-
         jpg = _encode_jpeg(img) if img is not None else None
         if jpg:
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-        time.sleep(0.2)  # ~5 Hz
-
+        time.sleep(0.2)
 
 @app.route("/roi_integration_feed/<rid>")
 def roi_integration_feed(rid: str):
     return mjpeg_response(_roi_integration_frames(rid))
 
-
 def _roi_profile_frames(rid: str) -> Generator[bytes, None, None]:
-    """Generates a heatmap of the ROI crop."""
     boundary = b"--frame\r\n"
     while True:
         r = roi_registry.get(rid)
         gray = cam_service.get_latest_gray()
-
         if r is None or gray is None or gray.size == 0:
             img = _placeholder("ROI or frame unavailable", (256, 256))
         else:
-            # Get scale limit from metrics
             snap = metrics.get_snapshot()
             y_max_map = snap.get("y_max_integral", {})
             y_max_integral = y_max_map.get(rid, 0.0)
             exposure_us = snap.get("exposure_us", 1)
-
-            # Per-pixel equivalent of the integration limit
             area = max(1, r.w * r.h)
             per_pixel_ylim = (1.1 * y_max_integral) / area
-
-            # Convert 8-bit min intensity (32) to per-ms units for a fair comparison
             min_vmax_per_ms = 32.0 / max(1, exposure_us) * 1000.0
             vmax = max(per_pixel_ylim, min_vmax_per_ms)
-
-            # Crop safely
             h_img, w_img = gray.shape[:2]
             x0 = max(0, min(int(r.x), w_img - 1))
             y0 = max(0, min(int(r.y), h_img - 1))
             x1 = max(x0 + 1, min(int(r.x + r.w), w_img))
             y1 = max(y0 + 1, min(int(r.y + r.h), h_img))
             roi_gray = gray[y0:y1, x0:x1]
-
             if roi_gray.size == 0:
                 img = _placeholder("ROI out of bounds", (256, 256))
             else:
-                # Normalize to per-ms intensity and apply vmax scale
                 roi_per_ms = roi_gray.astype(np.float32) / max(1, exposure_us) * 1000.0
                 norm = np.clip(roi_per_ms / max(1e-6, vmax), 0, 1)
                 roi_u8 = (norm * 255.0).astype(np.uint8)
-
                 cm = cam_service.get_colormap()
                 img = apply_colormap_to_gray(roi_u8, cm)
-
         jpg = _encode_jpeg(img)
         if jpg:
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-        time.sleep(0.1) # ~10 Hz
-
+        time.sleep(0.1)
 
 @app.route("/roi_profile_feed/<rid>")
 def roi_profile_feed(rid: str):
     return mjpeg_response(_roi_profile_frames(rid))
 
-
 # Save bundle (JSON + PNG inside a ZIP)
 @app.route("/save_bundle")
 def save_bundle():
+    # ... (omitted for brevity, no changes)
     base = request.args.get("base", "").strip()
     if not base:
         return jsonify({"error": "Missing base"}), 400
-
-    # Capture consistent snapshot
     bgr = cam_service.get_latest_bgr()
     size = cam_service.get_frame_size()
     exp = cam_service.get_exposure_us()
     cm = cam_service.get_colormap()
     snap = metrics.get_snapshot()
     rois = roi_registry.list_dicts()
-
-    # JSON
     payload: Dict = {
         "timestamp_iso": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "camera_id": cam_service.get_camera_id(),
@@ -380,23 +405,23 @@ def save_bundle():
         "rois": rois,
     }
     json_bytes = json.dumps(payload, indent=2).encode("utf-8")
-
-    # PNG of current raw overview frame (BGR)
     if bgr is None:
         png_bytes = _encode_png(_placeholder("No frame", (640, 480)))
     else:
         png_bytes = _encode_png(bgr)
-
-    # ZIP in-memory
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{base}.json", json_bytes)
         if png_bytes:
             zf.writestr(f"{base}.png", png_bytes)
     mem.seek(0)
-
     return send_file(mem, mimetype="application/zip", as_attachment=True, download_name=f"{base}.zip")
 
 if __name__ == "__main__":
-    # Do not auto-start camera; user toggles it from UI
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode and file logging.")
+    args = parser.parse_args()
+
+    setup_logging(debug_mode=args.debug)
+
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

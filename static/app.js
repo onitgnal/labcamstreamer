@@ -40,6 +40,17 @@
   };
 
   // ----- REST helpers -----
+  async function logToServer(level, message, data) {
+    try {
+      // fire and forget
+      fetch('/log/js', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ level, message, data })
+      });
+    } catch (_) { /* ignore logging errors */ }
+  }
+
   async function getJSON(url) {
     const cacheBustUrl = new URL(url, window.location.origin);
     cacheBustUrl.searchParams.set('t', Date.now());
@@ -65,8 +76,9 @@
   async function resetMax(roiId) {
     try {
       await postJSON(`/roi/${encodeURIComponent(roiId)}/reset_max`, {});
+      logToServer('info', 'Reset max for ROI', { roiId });
     } catch(e) {
-      console.warn("Failed to reset max", e);
+      logToServer('error', 'Failed to reset max for ROI', { roiId, error: e.toString() });
     }
   }
 
@@ -122,14 +134,17 @@
   async function refreshRois() {
     try {
       const list = await getJSON('/rois');
+      logToServer('info', 'Refreshed ROI list from server', { count: list.length, ids: list.map(r => r.id) });
       state.rois = Array.isArray(list) ? list : [];
       if (state.selectedId && !state.rois.find(r => r.id === state.selectedId)) {
         state.selectedId = null;
       }
       renderRoiList();
-      renderPerRoiPanels(); // New function
+      renderPerRoiPanels();
       drawOverlay();
-    } catch (_) {}
+    } catch (e) {
+      logToServer('error', 'Failed to refresh ROIs', { error: e.toString() });
+    }
   }
 
   function findRoi(id) {
@@ -137,6 +152,7 @@
   }
 
   async function createRoi(rect) {
+    logToServer('info', 'Attempting to create ROI', { rect });
     const r = clampRectStream(rect.x, rect.y, rect.w, rect.h);
     const created = await postJSON('/rois', r);
     await refreshRois();
@@ -158,10 +174,13 @@
   }
 
   async function deleteRoi(roiId) {
+    logToServer('info', 'Attempting to delete ROI', { roiId });
     try {
       await del(`/rois/${encodeURIComponent(roiId)}`);
       await refreshRois();
-    } catch (_) {}
+    } catch (e) {
+      logToServer('error', 'Failed to delete ROI', { roiId, error: e.toString() });
+    }
   }
 
   // ----- Metrics polling -----
@@ -174,16 +193,11 @@
       statsExposure.textContent = `exp: ${exp}`;
       statsFps.textContent = `fps: ${fps.toFixed(1)}`;
 
-      // Toggle panels based on ROI count
       const hasRois = (snap?.rois?.length || state.rois.length) > 0;
-      // Hide old panels
       barPanel.hidden = true;
       roiGridPanel.hidden = true;
-      // Show new panel
       perRoiPanels.hidden = !hasRois;
 
-
-      // Update ROI cards with metrics
       renderRoiList();
     } catch (_) {
       // ignore transient errors
@@ -250,12 +264,10 @@
 
   function renderPerRoiPanels() {
     const ids = state.rois.map(r => r.id);
-    // Remove stale cards
     for (const child of Array.from(perRoiGrid.children)) {
       const id = child.getAttribute('data-roi');
       if (!ids.includes(id)) child.remove();
     }
-    // Ensure each ROI has a card
     for (const r of state.rois) {
       let card = perRoiGrid.querySelector(`.per-roi-card[data-roi="${r.id}"]`);
       if (!card) {
@@ -304,13 +316,9 @@
   function drawOverlay() {
     const { width, height } = canvas;
     ctx.clearRect(0, 0, width, height);
-
-    // Dim/guide overlay optional
-    // Draw ROIs
     for (const r of state.rois) {
       drawRoi(r, r.id === state.selectedId ? '#50e3c2' : '#4a90e2');
     }
-    // Draw preview if creating
     if (state.preview) {
       ctx.save();
       ctx.strokeStyle = '#ffd166';
@@ -339,17 +347,15 @@
     ctx.lineWidth = 2;
     strokeRectRounded(disp.x, disp.y, disp.w, disp.h, 4);
 
-    // semi-transparent fill
     ctx.fillStyle = 'rgba(74,144,226,0.12)';
     ctx.fillRect(disp.x, disp.y, disp.w, disp.h);
 
-    // handles
     drawHandles(disp, color);
     ctx.restore();
   }
 
   function drawHandles(d, color) {
-    const hs = 7; // half-size ~ handle size/2
+    const hs = 7;
     const pts = handlePoints(d);
     ctx.fillStyle = color;
     for (const p of pts) {
@@ -360,20 +366,12 @@
   function handlePoints(d) {
     const x0 = d.x, y0 = d.y, x1 = d.x + d.w, y1 = d.y + d.h, xm = x0 + d.w/2, ym = y0 + d.h/2;
     return [
-      {name:'tl', x:x0, y:y0},
-      {name:'tr', x:x1, y:y0},
-      {name:'bl', x:x0, y:y1},
-      {name:'br', x:x1, y:y1},
-      {name:'tm', x:xm, y:y0},
-      {name:'bm', x:xm, y:y1},
-      {name:'ml', x:x0, y:ym},
-      {name:'mr', x:x1, y:ym},
+      {name:'tl', x:x0, y:y0}, {name:'tr', x:x1, y:y0}, {name:'bl', x:x0, y:y1}, {name:'br', x:x1, y:y1},
+      {name:'tm', x:xm, y:y0}, {name:'bm', x:xm, y:y1}, {name:'ml', x:x0, y:ym}, {name:'mr', x:x1, y:ym},
     ];
   }
 
   function hitTest(px, py) {
-    // Return {roi, kind:'handle'|'inside'|'none', handle?}
-    // Prefer handles over inside
     const handleRadius = 9;
     for (const r of state.rois) {
       const disp = toDisplayRect(r);
@@ -403,32 +401,16 @@
     if (e.button !== 0) return;
     const p = canvasPoint(e);
     state.mouse = { x:p.x, y:p.y, down:true };
-
     const hit = hitTest(p.x, p.y);
     if (hit.kind === 'handle' && hit.roi) {
       state.selectedId = hit.roi.id;
-      state.drag = {
-        mode: 'resize',
-        roiId: hit.roi.id,
-        start: { x:p.x, y:p.y },
-        handle: hit.handle,
-        orig: { ...hit.roi }
-      };
+      state.drag = { mode: 'resize', roiId: hit.roi.id, start: { x:p.x, y:p.y }, handle: hit.handle, orig: { ...hit.roi } };
     } else if (hit.kind === 'inside' && hit.roi) {
       state.selectedId = hit.roi.id;
-      state.drag = {
-        mode: 'move',
-        roiId: hit.roi.id,
-        start: { x:p.x, y:p.y },
-        orig: { ...hit.roi }
-      };
+      state.drag = { mode: 'move', roiId: hit.roi.id, start: { x:p.x, y:p.y }, orig: { ...hit.roi } };
     } else {
       state.selectedId = null;
-      state.drag = {
-        mode: 'create',
-        roiId: null,
-        start: { x:p.x, y:p.y }
-      };
+      state.drag = { mode: 'create', roiId: null, start: { x:p.x, y:p.y } };
       state.preview = null;
     }
     drawOverlay();
@@ -437,12 +419,8 @@
   window.addEventListener('mousemove', (e) => {
     if (!state.mouse.down) return;
     const p = canvasPoint(e);
-    const dx = p.x - state.mouse.x;
-    const dy = p.y - state.mouse.y;
     state.mouse = { x:p.x, y:p.y, down:true };
-
     if (!state.drag) return;
-
     if (state.drag.mode === 'move' && state.drag.roiId) {
       const sel = findRoi(state.drag.roiId);
       if (!sel) return;
@@ -450,7 +428,6 @@
       const nx = state.drag.orig.x + Math.round((p.x - state.drag.start.x) * sx);
       const ny = state.drag.orig.y + Math.round((p.y - state.drag.start.y) * sy);
       const rect = clampRectStream(nx, ny, sel.w, sel.h);
-      // Update local model for smooth draw
       sel.x = rect.x; sel.y = rect.y;
       debouncePut(sel.id, rect);
       drawOverlay();
@@ -461,7 +438,6 @@
       const { sx, sy } = scaleFactors();
       const ddx = Math.round((p.x - state.drag.start.x) * sx);
       const ddy = Math.round((p.y - state.drag.start.y) * sy);
-
       let x = o.x, y = o.y, w = o.w, h = o.h;
       switch (state.drag.handle) {
         case 'tl': x = o.x + ddx; y = o.y + ddy; w = o.w - ddx; h = o.h - ddy; break;
@@ -482,7 +458,6 @@
     } else if (state.drag.mode === 'create') {
       const { sx, sy } = scaleFactors();
       const s = state.drag.start;
-      // Convert both points to stream coords, then normalized rect
       const p0 = toStreamCoords(s.x, s.y);
       const p1 = toStreamCoords(p.x, p.y);
       const x = Math.min(p0.x, p1.x);
@@ -499,11 +474,9 @@
     state.mouse.down = false;
     const drag = state.drag;
     state.drag = null;
-
     if (drag?.mode === 'create' && state.preview) {
       const r = state.preview;
       state.preview = null;
-      // ignore micro drags
       if (r.w >= 3 && r.h >= 3) {
         try { await createRoi(r); } catch (_) {}
       }
@@ -514,10 +487,7 @@
   // ----- Controls wiring -----
   async function syncControls() {
     try {
-      const [exp, cm] = await Promise.all([
-        getJSON('/exposure'),
-        getJSON('/colormap')
-      ]);
+      const [exp, cm] = await Promise.all([ getJSON('/exposure'), getJSON('/colormap') ]);
       if (typeof exp?.value === 'number') {
         expSlider.value = String(exp.value);
         expLabel.textContent = String(exp.value);
@@ -528,9 +498,7 @@
     } catch (_) {}
   }
 
-  expSlider.addEventListener('input', () => {
-    expLabel.textContent = String(expSlider.value);
-  });
+  expSlider.addEventListener('input', () => { expLabel.textContent = String(expSlider.value); });
   expSlider.addEventListener('change', async () => {
     const v = parseInt(expSlider.value, 10);
     try {
@@ -555,10 +523,9 @@
     try {
       const res = await postJSON('/camera', { enabled });
       cameraToggle.checked = !!res.enabled;
-      // force image reload to ensure stream resumes/stops
       stream.src = enabled ? '/video_feed?ts=' + Date.now() : '';
     } catch (_) {
-      cameraToggle.checked = !enabled; // revert on failure
+      cameraToggle.checked = !enabled;
     }
   });
 
@@ -580,14 +547,12 @@
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
-      // optional toast
       console.warn(e);
     }
   });
 
   // ----- Image events -----
   stream.addEventListener('load', () => {
-    // Capture natural size
     state.naturalW = stream.naturalWidth || 0;
     state.naturalH = stream.naturalHeight || 0;
     resizeCanvasToImage();
@@ -601,8 +566,6 @@
     await syncControls();
     await refreshRois();
     pollMetrics();
-    // Start with camera disabled; user can toggle
-    // Ensure canvas overlays the image initially
     if (stream.complete) {
       state.naturalW = stream.naturalWidth || state.naturalW;
       state.naturalH = stream.naturalHeight || state.naturalH;
