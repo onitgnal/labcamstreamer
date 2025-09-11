@@ -125,7 +125,7 @@ class CameraService:
 
         self._latest_bgr: Optional[np.ndarray] = None
         self._latest_gray: Optional[np.ndarray] = None
-        self._colormap: str = "grey"
+        self._colormap: str = "jet"
 
     # ---------- Lifecycle ----------
 
@@ -217,11 +217,12 @@ class CameraService:
     # ---------- Camera setup helpers (ported/extended from baseline) ----------
 
     def _setup_camera(self, cam: Camera) -> None:
-        # Optional auto features if supported
+        # Set startup defaults: manual exposure at 1000us
         try:
-            cam.ExposureAuto.set("Continuous")
+            # This handles turning ExposureAuto off
+            self.set_exposure_us(1000)
         except (AttributeError, VmbFeatureError):
-            pass
+            pass  # Some cameras might not have this feature
 
         try:
             cam.BalanceWhiteAuto.set("Continuous")

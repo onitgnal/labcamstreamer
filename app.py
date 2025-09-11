@@ -152,6 +152,8 @@ def rois_item(rid: str):
         return jsonify(r)
     if request.method == "DELETE":
         ok = roi_registry.delete(rid)
+        if ok:
+            metrics.remove_roi_metrics(rid)
         return jsonify({"deleted": bool(ok)})
     # PUT update
     data = request.get_json(silent=True) or {}
@@ -163,6 +165,11 @@ def rois_item(rid: str):
     if not r:
         return jsonify({"error": "Not found"}), 404
     return jsonify(r.to_dict())
+
+@app.route("/roi/<rid>/reset_max", methods=["POST"])
+def roi_reset_max(rid: str):
+    metrics.reset_max_integral(rid)
+    return jsonify({"ok": True})
 
 # Metrics polling
 @app.route("/metrics")
@@ -248,6 +255,104 @@ def _roi_stream_frames(rid: str) -> Generator[bytes, None, None]:
 @app.route("/roi_feed/<rid>")
 def roi_feed(rid: str):
     return mjpeg_response(_roi_stream_frames(rid))
+
+
+# ----- Per-ROI Plot Feeds -----
+
+def _roi_integration_frames(rid: str) -> Generator[bytes, None, None]:
+    """Generates a Matplotlib PNG of the integration value for a single ROI."""
+    boundary = b"--frame\r\n"
+    while True:
+        snap = metrics.get_snapshot()
+        all_rois_metrics = snap.get("rois", [])
+        roi_metric = next((r for r in all_rois_metrics if r["id"] == rid), None)
+
+        y_max_map = snap.get("y_max_integral", {})
+        y_max = y_max_map.get(rid, 0.0)
+
+        if not roi_metric:
+            img = _placeholder(f"ROI {rid} not found", (320, 240))
+        else:
+            value_per_ms = roi_metric.get("value_per_ms", 0.0)
+
+            fig, ax = plt.subplots(figsize=(3.2, 2.4), dpi=100)
+            ax.bar(["value"], [value_per_ms], color="#4a90e2")
+            ax.set_ylim(0, max(1.0, 1.1 * y_max))
+            ax.set_ylabel("integration / ms")
+            ax.set_title(f"ROI {rid} Integration")
+            ax.grid(axis="y", linestyle="--", alpha=0.7)
+            fig.tight_layout()
+
+            buf = io.BytesIO()
+            fig.canvas.print_png(buf)
+            plt.close(fig)
+
+            img = cv2.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
+
+        jpg = _encode_jpeg(img) if img is not None else None
+        if jpg:
+            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
+        time.sleep(0.2)  # ~5 Hz
+
+
+@app.route("/roi_integration_feed/<rid>")
+def roi_integration_feed(rid: str):
+    return mjpeg_response(_roi_integration_frames(rid))
+
+
+def _roi_profile_frames(rid: str) -> Generator[bytes, None, None]:
+    """Generates a heatmap of the ROI crop."""
+    boundary = b"--frame\r\n"
+    while True:
+        r = roi_registry.get(rid)
+        gray = cam_service.get_latest_gray()
+
+        if r is None or gray is None or gray.size == 0:
+            img = _placeholder("ROI or frame unavailable", (256, 256))
+        else:
+            # Get scale limit from metrics
+            snap = metrics.get_snapshot()
+            y_max_map = snap.get("y_max_integral", {})
+            y_max_integral = y_max_map.get(rid, 0.0)
+            exposure_us = snap.get("exposure_us", 1)
+
+            # Per-pixel equivalent of the integration limit
+            area = max(1, r.w * r.h)
+            per_pixel_ylim = (1.1 * y_max_integral) / area
+
+            # Convert 8-bit min intensity (32) to per-ms units for a fair comparison
+            min_vmax_per_ms = 32.0 / max(1, exposure_us) * 1000.0
+            vmax = max(per_pixel_ylim, min_vmax_per_ms)
+
+            # Crop safely
+            h_img, w_img = gray.shape[:2]
+            x0 = max(0, min(int(r.x), w_img - 1))
+            y0 = max(0, min(int(r.y), h_img - 1))
+            x1 = max(x0 + 1, min(int(r.x + r.w), w_img))
+            y1 = max(y0 + 1, min(int(r.y + r.h), h_img))
+            roi_gray = gray[y0:y1, x0:x1]
+
+            if roi_gray.size == 0:
+                img = _placeholder("ROI out of bounds", (256, 256))
+            else:
+                # Normalize to per-ms intensity and apply vmax scale
+                roi_per_ms = roi_gray.astype(np.float32) / max(1, exposure_us) * 1000.0
+                norm = np.clip(roi_per_ms / max(1e-6, vmax), 0, 1)
+                roi_u8 = (norm * 255.0).astype(np.uint8)
+
+                cm = cam_service.get_colormap()
+                img = apply_colormap_to_gray(roi_u8, cm)
+
+        jpg = _encode_jpeg(img)
+        if jpg:
+            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
+        time.sleep(0.1) # ~10 Hz
+
+
+@app.route("/roi_profile_feed/<rid>")
+def roi_profile_feed(rid: str):
+    return mjpeg_response(_roi_profile_frames(rid))
+
 
 # Save bundle (JSON + PNG inside a ZIP)
 @app.route("/save_bundle")

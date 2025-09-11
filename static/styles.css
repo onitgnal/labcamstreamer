@@ -246,3 +246,70 @@ select{
   .sidebar{ height:46vh; }
   .workspace{ height:54vh; }
 }
+
+/* Per-ROI Panels */
+.per-roi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.per-roi-card {
+  background: #11151d;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.per-roi-card .header {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--panel-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+}
+
+.per-roi-card .header .title {
+  color: var(--text);
+}
+
+.per-roi-card .header .dims {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.per-roi-card .plots {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+}
+
+.per-roi-card img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 6px;
+  border: 1px solid var(--panel-border);
+}
+
+.per-roi-card .toolbar {
+    padding: 0 10px 8px;
+}
+
+.per-roi-card .toolbar button {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--panel-border);
+  background: #1c222e;
+  color: #c1d2f5;
+  cursor: pointer;
+}
+.per-roi-card .toolbar button:hover {
+    filter: brightness(1.2);
+}

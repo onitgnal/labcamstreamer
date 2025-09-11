@@ -27,6 +27,7 @@ class MetricsComputer:
     - Applies background subtraction using a ring around each ROI.
     - Applies exposure normalization (per ms).
     - Maintains rolling FPS.
+    - Remembers max integration value per ROI.
     Thread-safe snapshot access via an internal lock.
     """
 
@@ -35,11 +36,15 @@ class MetricsComputer:
         self._fps_times: deque[float] = deque()
         self._fps_window = float(max(0.5, fps_window_seconds))
 
+        # Per-ROI persistent state
+        self._y_max_integral: Dict[str, float] = {}
+
         self._snapshot: Dict = {
             "timestamp": 0.0,
             "fps": 0.0,
             "exposure_us": 0,
             "rois": [],  # list[dict]
+            "y_max_integral": {}, # dict[str, float]
         }
 
     # ---------- Helpers ----------
@@ -165,16 +170,47 @@ class MetricsComputer:
             )
 
         with self._lock:
+            # Update per-ROI max values
+            for m in roi_metrics:
+                # Initialize with first value, then track max
+                current_max = self._y_max_integral.get(m.id, m.value_per_ms)
+                self._y_max_integral[m.id] = max(current_max, m.value_per_ms)
+
+            # Prune stale ROIs from max tracking, which can happen if an ROI is deleted
+            active_roi_ids = {m.id for m in roi_metrics}
+            stale_ids = [k for k in self._y_max_integral if k not in active_roi_ids]
+            for rid in stale_ids:
+                if rid in self._y_max_integral:
+                    del self._y_max_integral[rid]
+
             self._snapshot = {
                 "timestamp": now,
                 "fps": float(fps),
                 "exposure_us": int(exposure_us),
                 "rois": [m.to_dict() for m in roi_metrics],
+                "y_max_integral": dict(self._y_max_integral),
             }
 
     def get_snapshot(self) -> Dict:
         with self._lock:
-            # Return a shallow copy safe for JSON
+            # Return a deep enough copy for safe iteration
             snap = dict(self._snapshot)
             snap["rois"] = [dict(r) for r in self._snapshot.get("rois", [])]
+            snap["y_max_integral"] = dict(self._snapshot.get("y_max_integral", {}))
             return snap
+
+    def reset_max_integral(self, rid: str) -> None:
+        with self._lock:
+            # Find current value for this ROI from last snapshot
+            current_value = 0.0
+            for r in self._snapshot.get("rois", []):
+                if r.get("id") == rid:
+                    current_value = r.get("value_per_ms", 0.0)
+                    break
+            # Reset max to current value
+            if rid in self._y_max_integral:
+                self._y_max_integral[rid] = current_value
+
+    def remove_roi_metrics(self, rid: str) -> None:
+        with self._lock:
+            self._y_max_integral.pop(rid, None)

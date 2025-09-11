@@ -19,7 +19,8 @@
 
   const barPanel = qs('#barPanel');
   const roiGridPanel = qs('#roiGridPanel');
-  const roiGrid = qs('#roiGrid');
+  const perRoiPanels = qs('#perRoiPanels');
+  const perRoiGrid = qs('#perRoiGrid');
 
   const roiList = qs('#roiList');
 
@@ -59,6 +60,14 @@
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   }
+  async function resetMax(roiId) {
+    try {
+      await postJSON(`/roi/${encodeURIComponent(roiId)}/reset_max`, {});
+    } catch(e) {
+      console.warn("Failed to reset max", e);
+    }
+  }
+
 
   // ----- Canvas sizing -----
   function resizeCanvasToImage() {
@@ -116,7 +125,7 @@
         state.selectedId = null;
       }
       renderRoiList();
-      renderRoiGrid();
+      renderPerRoiPanels(); // New function
       drawOverlay();
     } catch (_) {}
   }
@@ -165,8 +174,12 @@
 
       // Toggle panels based on ROI count
       const hasRois = (snap?.rois?.length || state.rois.length) > 0;
-      barPanel.hidden = !hasRois;
-      roiGridPanel.hidden = !hasRois;
+      // Hide old panels
+      barPanel.hidden = true;
+      roiGridPanel.hidden = true;
+      // Show new panel
+      perRoiPanels.hidden = !hasRois;
+
 
       // Update ROI cards with metrics
       renderRoiList();
@@ -193,10 +206,22 @@
       const head = document.createElement('div');
       head.className = 'head';
       head.innerHTML = `<span>${r.id}</span>`;
+
+      const btnGroup = document.createElement('div');
+      btnGroup.style.display = 'flex';
+      btnGroup.style.gap = '6px';
+
+      const resetBtn = document.createElement('button');
+      resetBtn.textContent = 'Reset Max';
+      resetBtn.onclick = () => resetMax(r.id);
+
       const delBtn = document.createElement('button');
       delBtn.className = 'danger';
       delBtn.textContent = 'Delete';
       delBtn.onclick = () => deleteRoi(r.id);
+
+      btnGroup.appendChild(resetBtn);
+      btnGroup.appendChild(delBtn);
 
       const coords = document.createElement('div');
       coords.className = 'coords';
@@ -209,50 +234,69 @@
       metrics.innerHTML = `<span>Sum: ${sum}</span><span>Value/ms: ${vms}</span>`;
 
       card.appendChild(head);
-      card.appendChild(delBtn);
+      card.appendChild(btnGroup);
       card.appendChild(coords);
       card.appendChild(metrics);
       card.onclick = (e) => {
-        if (e.target === delBtn) return;
+        if (e.target === delBtn || e.target === resetBtn) return;
         state.selectedId = r.id;
         drawOverlay();
-        // also scroll into view highlight
       };
       roiList.appendChild(card);
     }
   }
 
-  function renderRoiGrid() {
-    // Build tiles one per ROI
+  function renderPerRoiPanels() {
     const ids = state.rois.map(r => r.id);
-    // Remove stale tiles
-    for (const child of Array.from(roiGrid.children)) {
+    // Remove stale cards
+    for (const child of Array.from(perRoiGrid.children)) {
       const id = child.getAttribute('data-roi');
       if (!ids.includes(id)) child.remove();
     }
-    // Ensure each ROI has a tile
+    // Ensure each ROI has a card
     for (const r of state.rois) {
-      let tile = roiGrid.querySelector(`.roi-tile[data-roi="${r.id}"]`);
-      if (!tile) {
-        tile = document.createElement('div');
-        tile.className = 'roi-tile';
-        tile.setAttribute('data-roi', r.id);
-        const img = document.createElement('img');
-        img.alt = r.id;
-        img.src = `/roi_feed/${encodeURIComponent(r.id)}`;
-        const cap = document.createElement('div');
-        cap.className = 'caption';
-        cap.textContent = r.id;
-        tile.appendChild(img);
-        tile.appendChild(cap);
-        tile.onclick = () => {
-          state.selectedId = r.id;
-          drawOverlay();
-        };
-        roiGrid.appendChild(tile);
+      let card = perRoiGrid.querySelector(`.per-roi-card[data-roi="${r.id}"]`);
+      if (!card) {
+        card = document.createElement('div');
+        card.className = 'per-roi-card';
+        card.setAttribute('data-roi', r.id);
+
+        const header = document.createElement('div');
+        header.className = 'header';
+        header.innerHTML = `<span class="title">${r.id}</span><span class="dims">${r.w}x${r.h}</span>`;
+
+        const plots = document.createElement('div');
+        plots.className = 'plots';
+
+        const profileImg = document.createElement('img');
+        profileImg.className = 'roi-profile';
+        profileImg.alt = `Profile ${r.id}`;
+        profileImg.src = `/roi_profile_feed/${encodeURIComponent(r.id)}`;
+
+        const integrationImg = document.createElement('img');
+        integrationImg.className = 'roi-integration';
+        integrationImg.alt = `Integration ${r.id}`;
+        integrationImg.src = `/roi_integration_feed/${encodeURIComponent(r.id)}`;
+
+        plots.appendChild(profileImg);
+        plots.appendChild(integrationImg);
+
+        const toolbar = document.createElement('div');
+        toolbar.className = 'toolbar';
+        const resetBtn = document.createElement('button');
+        resetBtn.textContent = 'Reset Max';
+        resetBtn.onclick = () => resetMax(r.id);
+        toolbar.appendChild(resetBtn);
+
+        card.appendChild(header);
+        card.appendChild(plots);
+        card.appendChild(toolbar);
+
+        perRoiGrid.appendChild(card);
       }
     }
   }
+
 
   // ----- Overlay drawing -----
   function drawOverlay() {
