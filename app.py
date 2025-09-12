@@ -226,10 +226,14 @@ def rois_item(rid: str):
     data = request.get_json(silent=True) or {}
     app.logger.info(f"PUT /rois/{rid}: Updating ROI with data: {data}")
     try:
-        x = int(data.get("x")); y = int(data.get("y")); w = int(data.get("w")); h = int(data.get("h"))
-    except Exception:
+        x = int(data.get("x"))
+        y = int(data.get("y"))
+        w = int(data.get("w"))
+        h = int(data.get("h"))
+    except (TypeError, ValueError):
         app.logger.warning(f"Invalid ROI data received for update on ROI {rid}.")
         return jsonify({"error": "Invalid ROI"}), 400
+
     r = roi_registry.update(rid, x, y, w, h, cam_service.get_frame_size())
     if not r:
         return jsonify({"error": "Not found"}), 404
@@ -441,7 +445,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     port = 5001 if args.dev else 5000
-    setup_logging(debug_mode=args.dev)
+    setup_logging(dev_mode=args.dev)
 
     app.logger.info(f"Starting server on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
