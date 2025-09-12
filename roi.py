@@ -27,7 +27,6 @@ class ROIRegistry:
     def __init__(self):
         self._lock = threading.Lock()
         self._rois: Dict[str, ROI] = {}
-        self._next_id = 1
 
     # ---------- Helpers ----------
 
@@ -70,9 +69,13 @@ class ROIRegistry:
         return x, y, w, h
 
     def _allocate_id(self) -> str:
-        rid = f"roi-{self._next_id}"
-        self._next_id += 1
-        return rid
+        """Find the lowest available ROI ID (e.g., roi-1, roi-2, ...)."""
+        i = 1
+        while True:
+            rid = f"roi-{i}"
+            if rid not in self._rois:
+                return rid
+            i += 1
 
     # ---------- CRUD ----------
 

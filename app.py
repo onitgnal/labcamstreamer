@@ -23,8 +23,8 @@ from roi import ROIRegistry
 app = Flask(__name__, template_folder="templates", static_folder="static", static_url_path="/static")
 
 # ----- Logging Setup -----
-def setup_logging(debug_mode=False):
-    log_level = logging.DEBUG if debug_mode else logging.INFO
+def setup_logging(dev_mode=False):
+    log_level = logging.DEBUG if dev_mode else logging.INFO
     log_file = "app_debug.log"
 
     # Clear log file on startup
@@ -40,8 +40,8 @@ def setup_logging(debug_mode=False):
     app.logger.addHandler(handler)
     app.logger.setLevel(log_level)
     app.logger.info("Application starting up...")
-    if debug_mode:
-        app.logger.info("DEBUG mode enabled.")
+    if dev_mode:
+        app.logger.info("Development mode enabled.")
 
 # Global services
 cam_service = CameraService()
@@ -93,10 +93,18 @@ def _placeholder(text: str, size=(640, 360)) -> np.ndarray:
 
 @app.before_request
 def log_request_info():
-    if request.path != '/log/js': # Avoid logging the logger's own requests
-        app.logger.debug(f"Request: {request.method} {request.path}")
-        if request.data:
-            app.logger.debug(f"Request data: {request.data.decode('utf-8')}")
+    # Reduce log spam by ignoring frequent requests and logging others at DEBUG level
+    if request.path in ['/log/js', '/metrics']:
+        return
+
+    app.logger.debug(f"Request: {request.method} {request.path}")
+    if request.data and request.path != '/log/js':
+        try:
+            # Attempt to decode as utf-8, but don't fail if it's binary data
+            decoded_data = request.data.decode('utf-8')
+            app.logger.debug(f"Request data: {decoded_data}")
+        except UnicodeDecodeError:
+            app.logger.debug(f"Request data: <binary data of length {len(request.data)}>")
 
 @app.route("/")
 def index():
@@ -216,6 +224,12 @@ def rois_item(rid: str):
 
     # PUT update
     data = request.get_json(silent=True) or {}
+    app.logger.info(f"PUT /rois/{rid}: Updating ROI with data: {data}")
+    try:
+        x = int(data.get("x")); y = int(data.get("y")); w = int(data.get("w")); h = int(data.get("h"))
+    except Exception:
+        app.logger.warning(f"Invalid ROI data received for update on ROI {rid}.")
+        return jsonify({"error": "Invalid ROI"}), 400
     r = roi_registry.update(rid, x, y, w, h, cam_service.get_frame_size())
     if not r:
         return jsonify({"error": "Not found"}), 404
@@ -422,10 +436,12 @@ def save_bundle():
     return send_file(mem, mimetype="application/zip", as_attachment=True, download_name=f"{base}.zip")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode and file logging.")
+    parser = argparse.ArgumentParser(description="Flask-based camera streamer.")
+    parser.add_argument("--dev", action="store_true", help="Enable development mode (logging to file, port 5001).")
     args = parser.parse_args()
 
-    setup_logging(debug_mode=args.debug)
+    port = 5001 if args.dev else 5000
+    setup_logging(debug_mode=args.dev)
 
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    app.logger.info(f"Starting server on port {port}...")
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
