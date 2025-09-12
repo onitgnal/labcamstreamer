@@ -76,7 +76,7 @@
   }
   async function resetMax(roiId) {
     try {
-      await postJSON(`/roi/${encodeURIComponent(roiId)}/reset_max`, {});
+      await postJSON(`/roi/${encodeURIComponent(roiId)}/reset_max_values`, {});
       logToServer('info', 'Reset max for ROI', { roiId });
     } catch(e) {
       logToServer('error', 'Failed to reset max for ROI', { roiId, error: e.toString() });

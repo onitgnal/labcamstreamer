@@ -239,10 +239,10 @@ def rois_item(rid: str):
         return jsonify({"error": "Not found"}), 404
     return jsonify(r.to_dict())
 
-@app.route("/roi/<rid>/reset_max", methods=["POST"])
-def roi_reset_max(rid: str):
-    app.logger.info(f"POST /roi/{rid}/reset_max: Resetting max for ROI.")
-    metrics.reset_max_integral(rid)
+@app.route("/roi/<rid>/reset_max_values", methods=["POST"])
+def roi_reset_max_values(rid: str):
+    app.logger.info(f"POST /roi/{rid}/reset_max_values: Resetting max values for ROI.")
+    metrics.reset_max_values(rid)
     return jsonify({"ok": True})
 
 # ... (rest of the file is the same, omitted for brevity) ...
@@ -302,13 +302,17 @@ def _roi_profile_frames(rid: str) -> Generator[bytes, None, None]:
             img = _placeholder("ROI or frame unavailable", (256, 256))
         else:
             snap = metrics.get_snapshot()
-            y_max_map = snap.get("y_max_integral", {})
-            y_max_integral = y_max_map.get(rid, 0.0)
+            y_max_pixel_map = snap.get("y_max_pixel", {})
+            vmax = y_max_pixel_map.get(rid, 0.0)
+
+            roi_metric = next((m for m in snap.get("rois", []) if m["id"] == rid), None)
+            bg_mean = roi_metric.get("bg_mean", 0.0) if roi_metric else 0.0
+
             exposure_us = snap.get("exposure_us", 1)
-            area = max(1, r.w * r.h)
-            per_pixel_ylim = (1.1 * y_max_integral) / area
-            min_vmax_per_ms = 32.0 / max(1, exposure_us) * 1000.0
-            vmax = max(per_pixel_ylim, min_vmax_per_ms)
+
+            min_vmax = 32.0 / max(1, exposure_us) * 1000.0
+            vmax = max(vmax, min_vmax)
+
             h_img, w_img = gray.shape[:2]
             x0 = max(0, min(int(r.x), w_img - 1))
             y0 = max(0, min(int(r.y), h_img - 1))
@@ -318,7 +322,8 @@ def _roi_profile_frames(rid: str) -> Generator[bytes, None, None]:
             if roi_gray.size == 0:
                 img = _placeholder("ROI out of bounds", (256, 256))
             else:
-                roi_per_ms = roi_gray.astype(np.float32) / max(1, exposure_us) * 1000.0
+                roi_corrected = np.maximum(0, roi_gray.astype(np.float32) - bg_mean)
+                roi_per_ms = roi_corrected / max(1, exposure_us) * 1000.0
                 norm = np.clip(roi_per_ms / max(1e-6, vmax), 0, 1)
                 roi_u8 = (norm * 255.0).astype(np.uint8)
                 cm = cam_service.get_colormap()

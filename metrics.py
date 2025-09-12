@@ -14,6 +14,7 @@ class RoiMetric:
     id: str
     sum_gray: int          # Background-corrected sum over ROI
     value_per_ms: float    # Exposure-normalized value (per ms)
+    max_pixel_per_ms: float # Exposure-normalized max pixel value
     raw_sum: int           # Raw sum over ROI (no background subtraction)
     bg_mean: float         # Mean of background ring around ROI
 
@@ -27,7 +28,7 @@ class MetricsComputer:
     - Applies background subtraction using a ring around each ROI.
     - Applies exposure normalization (per ms).
     - Maintains rolling FPS.
-    - Remembers max integration value per ROI.
+    - Remembers max integration and pixel values per ROI.
     Thread-safe snapshot access via an internal lock.
     """
 
@@ -38,6 +39,7 @@ class MetricsComputer:
 
         # Per-ROI persistent state
         self._y_max_integral: Dict[str, float] = {}
+        self._y_max_pixel: Dict[str, float] = {}
 
         self._snapshot: Dict = {
             "timestamp": 0.0,
@@ -45,6 +47,7 @@ class MetricsComputer:
             "exposure_us": 0,
             "rois": [],  # list[dict]
             "y_max_integral": {}, # dict[str, float]
+            "y_max_pixel": {}, # dict[str, float]
         }
 
     # ---------- Helpers ----------
@@ -159,11 +162,21 @@ class MetricsComputer:
             exp_us = max(1, int(exposure_us))
             v_ms = (float(s_corr) / float(exp_us)) * 1000.0
 
+            # Also find max pixel value
+            max_px_per_ms = 0.0
+            if isinstance(gray, np.ndarray) and gray.size > 0:
+                crop = self._safe_crop(gray, int(x), int(y), int(w), int(h))
+                if crop.size > 0:
+                    corrected_crop = np.maximum(0, crop.astype(np.float32) - bg)
+                    max_px_raw = np.max(corrected_crop)
+                    max_px_per_ms = (float(max_px_raw) / exp_us) * 1000.0
+
             roi_metrics.append(
                 RoiMetric(
                     id=str(rid),
                     sum_gray=int(s_corr),
                     value_per_ms=float(v_ms),
+                    max_pixel_per_ms=float(max_px_per_ms),
                     raw_sum=int(s_raw),
                     bg_mean=float(bg),
                 )
@@ -172,9 +185,12 @@ class MetricsComputer:
         with self._lock:
             # Update per-ROI max values
             for m in roi_metrics:
-                # Initialize with first value, then track max
-                current_max = self._y_max_integral.get(m.id, m.value_per_ms)
-                self._y_max_integral[m.id] = max(current_max, m.value_per_ms)
+                # Update max integral
+                current_max_integral = self._y_max_integral.get(m.id, m.value_per_ms)
+                self._y_max_integral[m.id] = max(current_max_integral, m.value_per_ms)
+                # Update max pixel
+                current_max_pixel = self._y_max_pixel.get(m.id, m.max_pixel_per_ms)
+                self._y_max_pixel[m.id] = max(current_max_pixel, m.max_pixel_per_ms)
 
             self._snapshot = {
                 "timestamp": now,
@@ -182,6 +198,7 @@ class MetricsComputer:
                 "exposure_us": int(exposure_us),
                 "rois": [m.to_dict() for m in roi_metrics],
                 "y_max_integral": dict(self._y_max_integral),
+                "y_max_pixel": dict(self._y_max_pixel),
             }
 
     def get_snapshot(self) -> Dict:
@@ -190,20 +207,26 @@ class MetricsComputer:
             snap = dict(self._snapshot)
             snap["rois"] = [dict(r) for r in self._snapshot.get("rois", [])]
             snap["y_max_integral"] = dict(self._snapshot.get("y_max_integral", {}))
+            snap["y_max_pixel"] = dict(self._snapshot.get("y_max_pixel", {}))
             return snap
 
-    def reset_max_integral(self, rid: str) -> None:
+    def reset_max_values(self, rid: str) -> None:
         with self._lock:
             # Find current value for this ROI from last snapshot
-            current_value = 0.0
+            current_integral = 0.0
+            current_pixel = 0.0
             for r in self._snapshot.get("rois", []):
                 if r.get("id") == rid:
-                    current_value = r.get("value_per_ms", 0.0)
+                    current_integral = r.get("value_per_ms", 0.0)
+                    current_pixel = r.get("max_pixel_per_ms", 0.0)
                     break
             # Reset max to current value
             if rid in self._y_max_integral:
-                self._y_max_integral[rid] = current_value
+                self._y_max_integral[rid] = current_integral
+            if rid in self._y_max_pixel:
+                self._y_max_pixel[rid] = current_pixel
 
     def remove_roi_metrics(self, rid: str) -> None:
         with self._lock:
             self._y_max_integral.pop(rid, None)
+            self._y_max_pixel.pop(rid, None)
