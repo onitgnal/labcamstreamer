@@ -252,46 +252,6 @@ def roi_reset_max(rid: str):
 def metrics_route():
     return jsonify(metrics.get_snapshot())
 
-# Bar plot MJPEG (~5 Hz)
-def _bar_frames() -> Generator[bytes, None, None]:
-    boundary = b"--frame\r\n"
-    while True:
-        snap = metrics.get_snapshot()
-        rois = snap.get("rois", [])
-        exp = int(snap.get("exposure_us", 0))
-        fps = float(snap.get("fps", 0.0))
-
-        if not rois:
-            img = _placeholder("Add ROIs to see bar plot", (640, 240))
-            jpg = _encode_jpeg(img)
-            if jpg:
-                yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-            time.sleep(0.2)
-            continue
-
-        labels = [r["id"] for r in rois]
-        values = [float(r["value_per_ms"]) for r in rois]
-
-        with _plot_lock:
-            fig, ax = plt.subplots(figsize=(6.4, 2.4), dpi=100)
-            ax.bar(labels, values, color="#4a90e2")
-            ax.set_ylabel("integration / ms")
-            ax.set_title(f"Exposure: {exp} µs   FPS: {fps:.1f}")
-            ax.grid(axis="y", linestyle="--", alpha=0.3)
-            fig.tight_layout()
-            buf = io.BytesIO()
-            fig.canvas.print_png(buf)
-            plt.close(fig)
-            img = cv2.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
-
-        jpg = _encode_jpeg(img) if img is not None else None
-        if jpg:
-            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-        time.sleep(0.2)
-
-@app.route("/bar_feed")
-def bar_feed():
-    return mjpeg_response(_bar_frames())
 
 # ROI mini-streams (~10 Hz)
 def _roi_stream_frames(rid: str) -> Generator[bytes, None, None]:
@@ -332,38 +292,6 @@ def roi_feed(rid: str):
     return mjpeg_response(_roi_stream_frames(rid))
 
 # ----- Per-ROI Plot Feeds -----
-def _roi_integration_frames(rid: str) -> Generator[bytes, None, None]:
-    boundary = b"--frame\r\n"
-    while True:
-        snap = metrics.get_snapshot()
-        all_rois_metrics = snap.get("rois", [])
-        roi_metric = next((r for r in all_rois_metrics if r["id"] == rid), None)
-        y_max_map = snap.get("y_max_integral", {})
-        y_max = y_max_map.get(rid, 0.0)
-        if not roi_metric:
-            img = _placeholder(f"ROI {rid} not found", (320, 240))
-        else:
-            value_per_ms = roi_metric.get("value_per_ms", 0.0)
-            with _plot_lock:
-                fig, ax = plt.subplots(figsize=(3.2, 2.4), dpi=100)
-                ax.bar(["value"], [value_per_ms], color="#4a90e2")
-                ax.set_ylim(0, max(1.0, 1.1 * y_max))
-                ax.set_ylabel("integration / ms")
-                ax.set_title(f"ROI {rid} Integration")
-                ax.grid(axis="y", linestyle="--", alpha=0.7)
-                fig.tight_layout()
-                buf = io.BytesIO()
-                fig.canvas.print_png(buf)
-                plt.close(fig)
-                img = cv2.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
-        jpg = _encode_jpeg(img) if img is not None else None
-        if jpg:
-            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-        time.sleep(0.2)
-
-@app.route("/roi_integration_feed/<rid>")
-def roi_integration_feed(rid: str):
-    return mjpeg_response(_roi_integration_frames(rid))
 
 def _roi_profile_frames(rid: str) -> Generator[bytes, None, None]:
     boundary = b"--frame\r\n"

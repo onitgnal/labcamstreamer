@@ -142,6 +142,7 @@
       }
       renderRoiList();
       renderPerRoiPanels();
+      updateIntegrationPlots();
       drawOverlay();
     } catch (e) {
       logToServer('error', 'Failed to refresh ROIs', { error: e.toString() });
@@ -195,10 +196,10 @@
       statsFps.textContent = `fps: ${fps.toFixed(1)}`;
 
       const hasRois = (snap?.rois?.length || state.rois.length) > 0;
-      barPanel.hidden = true;
       roiGridPanel.hidden = true;
       perRoiPanels.hidden = !hasRois;
 
+      updateIntegrationPlots();
       renderRoiList();
     } catch (_) {
       // ignore transient errors
@@ -282,13 +283,12 @@
       profileImg.alt = `Profile ${r.id}`;
       profileImg.src = `/roi_profile_feed/${encodeURIComponent(r.id)}`;
 
-      const integrationImg = document.createElement('img');
-      integrationImg.className = 'roi-integration';
-      integrationImg.alt = `Integration ${r.id}`;
-      integrationImg.src = `/roi_integration_feed/${encodeURIComponent(r.id)}`;
+      const integrationPlot = document.createElement('div');
+      integrationPlot.className = 'roi-integration-plot';
+      integrationPlot.innerHTML = `<div class="bar-container"><div class="bar"></div></div><span class="label"></span>`;
 
       plots.appendChild(profileImg);
-      plots.appendChild(integrationImg);
+      plots.appendChild(integrationPlot);
 
       const toolbar = document.createElement('div');
       toolbar.className = 'toolbar';
@@ -302,6 +302,34 @@
       card.appendChild(toolbar);
 
       perRoiGrid.appendChild(card);
+    }
+  }
+
+  function updateIntegrationPlots() {
+    if (!state.metrics?.rois) return;
+
+    const metricsMap = new Map();
+    for (const m of state.metrics.rois) metricsMap.set(m.id, m);
+
+    const yMaxMap = state.metrics.y_max_integral || {};
+
+    for (const r of state.rois) {
+      const plot = perRoiGrid.querySelector(`.per-roi-card[data-roi="${r.id}"] .roi-integration-plot`);
+      if (!plot) continue;
+
+      const m = metricsMap.get(r.id);
+      const bar = plot.querySelector('.bar');
+      const label = plot.querySelector('.label');
+
+      if (m) {
+        const yMax = yMaxMap[r.id] || 1.0;
+        const pct = (m.value_per_ms / Math.max(1.0, yMax)) * 100;
+        bar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+        label.textContent = `${m.value_per_ms.toFixed(1)}/ms`;
+      } else {
+        bar.style.width = '0%';
+        label.textContent = '-';
+      }
     }
   }
 
