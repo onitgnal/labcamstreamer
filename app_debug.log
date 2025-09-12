@@ -1,0 +1,157 @@
+2025-09-12 12:28:06,363 - app - INFO - Application starting up...
+2025-09-12 12:28:06,364 - app - INFO - Development mode enabled.
+2025-09-12 12:28:06,364 - app - INFO - Starting server on port 5001...
+2025-09-12 12:28:13,949 - app - DEBUG - Request: GET /
+2025-09-12 12:28:13,994 - app - DEBUG - Request: GET /static/styles.css
+2025-09-12 12:28:13,997 - app - DEBUG - Request: GET /static/app.js
+2025-09-12 12:28:14,536 - app - DEBUG - Request: GET /video_feed
+2025-09-12 12:28:14,550 - app - DEBUG - Request: GET /exposure
+2025-09-12 12:28:14,551 - app - DEBUG - Request: GET /colormap
+2025-09-12 12:28:14,566 - app - DEBUG - Request: GET /rois
+2025-09-12 12:28:14,567 - app - DEBUG - GET /rois: Returning 0 ROIs.
+2025-09-12 12:28:14,583 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 0, "ids": []}
+2025-09-12 12:28:18,292 - app - DEBUG - Request: POST /camera
+2025-09-12 12:28:18,293 - app - DEBUG - Request data: {"enabled":true}
+2025-09-12 12:28:18,293 - app - INFO - Camera START requested.
+2025-09-12 12:28:24,937 - app - INFO - Frame size changed to (640, 512). Clamping ROIs.
+2025-09-12 12:28:24,942 - app - DEBUG - Request: GET /video_feed
+2025-09-12 12:28:27,293 - app - DEBUG - Request: POST /exposure
+2025-09-12 12:28:27,294 - app - DEBUG - Request data: {"value":40000}
+2025-09-12 12:28:28,830 - app - DEBUG - Request: POST /exposure
+2025-09-12 12:28:28,830 - app - DEBUG - Request data: {"value":47000}
+2025-09-12 12:28:29,659 - app - DEBUG - Request: POST /exposure
+2025-09-12 12:28:29,660 - app - DEBUG - Request data: {"value":38000}
+2025-09-12 12:28:32,775 - app - DEBUG - Request: POST /rois
+2025-09-12 12:28:32,775 - app - DEBUG - Request data: {"x":151,"y":91,"w":119,"h":127}
+2025-09-12 12:28:32,776 - app - INFO - POST /rois: Creating ROI with data: {'x': 151, 'y': 91, 'w': 119, 'h': 127}
+2025-09-12 12:28:32,777 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 151, "y": 91, "w": 119, "h": 127}}
+2025-09-12 12:28:32,778 - app - INFO - ROI created successfully: {'id': 'roi-1', 'x': 151, 'y': 91, 'w': 119, 'h': 127}
+2025-09-12 12:28:32,788 - app - DEBUG - Request: GET /rois
+2025-09-12 12:28:32,789 - app - DEBUG - GET /rois: Returning 1 ROIs.
+2025-09-12 12:28:32,797 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 1, "ids": ["roi-1"]}
+2025-09-12 12:28:32,799 - app - DEBUG - Request: GET /roi_profile_feed/roi-1
+2025-09-12 12:28:47,243 - app - DEBUG - Request: DELETE /rois/roi-1
+2025-09-12 12:28:47,243 - app - INFO - DELETE /rois/roi-1: Deleting ROI.
+2025-09-12 12:28:47,244 - app - INFO - ROI roi-1 deleted from registry.
+2025-09-12 12:28:47,246 - app - INFO - [JS-INFO] Attempting to delete ROI | data: {"roiId": "roi-1"}
+2025-09-12 12:28:47,247 - app - INFO - Metrics for ROI roi-1 removed.
+2025-09-12 12:28:47,257 - app - DEBUG - Request: GET /rois
+2025-09-12 12:28:47,257 - app - DEBUG - GET /rois: Returning 0 ROIs.
+2025-09-12 12:28:47,267 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 0, "ids": []}
+2025-09-12 12:28:50,107 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 116, "y": 125, "w": 75, "h": 87}}
+2025-09-12 12:28:50,108 - app - DEBUG - Request: POST /rois
+2025-09-12 12:28:50,109 - app - DEBUG - Request data: {"x":116,"y":125,"w":75,"h":87}
+2025-09-12 12:28:50,109 - app - INFO - POST /rois: Creating ROI with data: {'x': 116, 'y': 125, 'w': 75, 'h': 87}
+2025-09-12 12:28:50,109 - app - INFO - ROI created successfully: {'id': 'roi-2', 'x': 116, 'y': 125, 'w': 75, 'h': 87}
+2025-09-12 12:28:50,119 - app - DEBUG - Request: GET /rois
+2025-09-12 12:28:50,119 - app - DEBUG - GET /rois: Returning 1 ROIs.
+2025-09-12 12:28:50,127 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 1, "ids": ["roi-2"]}
+2025-09-12 12:28:50,129 - app - DEBUG - Request: GET /roi_profile_feed/roi-2
+2025-09-12 12:28:59,109 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 338, "y": 322, "w": 121, "h": 109}}
+2025-09-12 12:28:59,111 - app - DEBUG - Request: POST /rois
+2025-09-12 12:28:59,112 - app - DEBUG - Request data: {"x":338,"y":322,"w":121,"h":109}
+2025-09-12 12:28:59,113 - app - INFO - POST /rois: Creating ROI with data: {'x': 338, 'y': 322, 'w': 121, 'h': 109}
+2025-09-12 12:28:59,113 - app - INFO - ROI created successfully: {'id': 'roi-3', 'x': 338, 'y': 322, 'w': 121, 'h': 109}
+2025-09-12 12:28:59,124 - app - DEBUG - Request: GET /rois
+2025-09-12 12:28:59,124 - app - DEBUG - GET /rois: Returning 2 ROIs.
+2025-09-12 12:28:59,132 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 2, "ids": ["roi-2", "roi-3"]}
+2025-09-12 12:28:59,135 - app - DEBUG - Request: GET /roi_profile_feed/roi-3
+2025-09-12 12:29:08,339 - app - INFO - [JS-INFO] Attempting to delete ROI | data: {"roiId": "roi-2"}
+2025-09-12 12:29:08,340 - app - DEBUG - Request: DELETE /rois/roi-2
+2025-09-12 12:29:08,340 - app - INFO - DELETE /rois/roi-2: Deleting ROI.
+2025-09-12 12:29:08,343 - app - INFO - ROI roi-2 deleted from registry.
+2025-09-12 12:29:08,343 - app - INFO - Metrics for ROI roi-2 removed.
+2025-09-12 12:29:08,353 - app - DEBUG - Request: GET /rois
+2025-09-12 12:29:08,354 - app - DEBUG - GET /rois: Returning 1 ROIs.
+2025-09-12 12:29:08,364 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 1, "ids": ["roi-3"]}
+2025-09-12 12:29:11,146 - app - INFO - [JS-INFO] Attempting to delete ROI | data: {"roiId": "roi-3"}
+2025-09-12 12:29:11,148 - app - DEBUG - Request: DELETE /rois/roi-3
+2025-09-12 12:29:11,148 - app - INFO - DELETE /rois/roi-3: Deleting ROI.
+2025-09-12 12:29:11,148 - app - INFO - ROI roi-3 deleted from registry.
+2025-09-12 12:29:11,148 - app - INFO - Metrics for ROI roi-3 removed.
+2025-09-12 12:29:11,157 - app - DEBUG - Request: GET /rois
+2025-09-12 12:29:11,157 - app - DEBUG - GET /rois: Returning 0 ROIs.
+2025-09-12 12:29:11,170 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 0, "ids": []}
+2025-09-12 12:29:17,812 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 49, "y": 62, "w": 52, "h": 66}}
+2025-09-12 12:29:17,815 - app - DEBUG - Request: POST /rois
+2025-09-12 12:29:17,816 - app - DEBUG - Request data: {"x":49,"y":62,"w":52,"h":66}
+2025-09-12 12:29:17,816 - app - INFO - POST /rois: Creating ROI with data: {'x': 49, 'y': 62, 'w': 52, 'h': 66}
+2025-09-12 12:29:17,819 - app - INFO - ROI created successfully: {'id': 'roi-4', 'x': 49, 'y': 62, 'w': 52, 'h': 66}
+2025-09-12 12:29:17,828 - app - DEBUG - Request: GET /rois
+2025-09-12 12:29:17,829 - app - DEBUG - GET /rois: Returning 1 ROIs.
+2025-09-12 12:29:17,837 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 1, "ids": ["roi-4"]}
+2025-09-12 12:29:17,839 - app - DEBUG - Request: GET /roi_profile_feed/roi-4
+2025-09-12 12:29:19,009 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 135, "y": 145, "w": 39, "h": 42}}
+2025-09-12 12:29:19,011 - app - DEBUG - Request: POST /rois
+2025-09-12 12:29:19,012 - app - DEBUG - Request data: {"x":135,"y":145,"w":39,"h":42}
+2025-09-12 12:29:19,013 - app - INFO - POST /rois: Creating ROI with data: {'x': 135, 'y': 145, 'w': 39, 'h': 42}
+2025-09-12 12:29:19,016 - app - INFO - ROI created successfully: {'id': 'roi-5', 'x': 135, 'y': 145, 'w': 39, 'h': 42}
+2025-09-12 12:29:19,024 - app - DEBUG - Request: GET /rois
+2025-09-12 12:29:19,024 - app - DEBUG - GET /rois: Returning 2 ROIs.
+2025-09-12 12:29:19,033 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 2, "ids": ["roi-4", "roi-5"]}
+2025-09-12 12:29:19,037 - app - DEBUG - Request: GET /roi_profile_feed/roi-5
+2025-09-12 12:29:19,906 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 215, "y": 190, "w": 23, "h": 40}}
+2025-09-12 12:29:19,907 - app - DEBUG - Request: POST /rois
+2025-09-12 12:29:19,907 - app - DEBUG - Request data: {"x":215,"y":190,"w":23,"h":40}
+2025-09-12 12:29:19,908 - app - INFO - POST /rois: Creating ROI with data: {'x': 215, 'y': 190, 'w': 23, 'h': 40}
+2025-09-12 12:29:19,908 - app - INFO - ROI created successfully: {'id': 'roi-6', 'x': 215, 'y': 190, 'w': 23, 'h': 40}
+2025-09-12 12:29:21,344 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 199, "y": 177, "w": 41, "h": 44}}
+2025-09-12 12:29:21,345 - app - DEBUG - Request: POST /rois
+2025-09-12 12:29:21,346 - app - DEBUG - Request data: {"x":199,"y":177,"w":41,"h":44}
+2025-09-12 12:29:21,346 - app - INFO - POST /rois: Creating ROI with data: {'x': 199, 'y': 177, 'w': 41, 'h': 44}
+2025-09-12 12:29:21,346 - app - INFO - ROI created successfully: {'id': 'roi-7', 'x': 199, 'y': 177, 'w': 41, 'h': 44}
+2025-09-12 12:29:22,445 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 263, "y": 198, "w": 55, "h": 65}}
+2025-09-12 12:29:22,447 - app - DEBUG - Request: POST /rois
+2025-09-12 12:29:22,447 - app - DEBUG - Request data: {"x":263,"y":198,"w":55,"h":65}
+2025-09-12 12:29:22,448 - app - INFO - POST /rois: Creating ROI with data: {'x': 263, 'y': 198, 'w': 55, 'h': 65}
+2025-09-12 12:29:22,448 - app - INFO - ROI created successfully: {'id': 'roi-8', 'x': 263, 'y': 198, 'w': 55, 'h': 65}
+2025-09-12 12:29:23,435 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 395, "y": 246, "w": 95, "h": 120}}
+2025-09-12 12:29:23,438 - app - DEBUG - Request: POST /rois
+2025-09-12 12:29:23,438 - app - DEBUG - Request data: {"x":395,"y":246,"w":95,"h":120}
+2025-09-12 12:29:23,439 - app - INFO - POST /rois: Creating ROI with data: {'x': 395, 'y': 246, 'w': 95, 'h': 120}
+2025-09-12 12:29:23,441 - app - INFO - ROI created successfully: {'id': 'roi-9', 'x': 395, 'y': 246, 'w': 95, 'h': 120}
+2025-09-12 12:29:29,302 - app - DEBUG - Request: GET /
+2025-09-12 12:29:29,309 - app - ERROR - [JS-ERROR] Failed to refresh ROIs | data: {"error": "TypeError: NetworkError when attempting to fetch resource."}
+2025-09-12 12:29:29,314 - app - ERROR - [JS-ERROR] Failed to refresh ROIs | data: {"error": "TypeError: NetworkError when attempting to fetch resource."}
+2025-09-12 12:29:29,321 - app - ERROR - [JS-ERROR] Failed to refresh ROIs | data: {"error": "TypeError: NetworkError when attempting to fetch resource."}
+2025-09-12 12:29:29,325 - app - ERROR - [JS-ERROR] Failed to refresh ROIs | data: {"error": "TypeError: NetworkError when attempting to fetch resource."}
+2025-09-12 12:29:29,335 - app - DEBUG - Request: GET /static/styles.css
+2025-09-12 12:29:29,336 - app - DEBUG - Request: GET /static/app.js
+2025-09-12 12:29:29,340 - app - DEBUG - Request: GET /video_feed
+2025-09-12 12:29:29,400 - app - DEBUG - Request: GET /colormap
+2025-09-12 12:29:29,402 - app - DEBUG - Request: GET /exposure
+2025-09-12 12:29:29,421 - app - DEBUG - Request: GET /rois
+2025-09-12 12:29:29,422 - app - DEBUG - GET /rois: Returning 6 ROIs.
+2025-09-12 12:29:29,435 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 6, "ids": ["roi-4", "roi-5", "roi-6", "roi-7", "roi-8", "roi-9"]}
+2025-09-12 12:29:29,438 - app - DEBUG - Request: GET /roi_profile_feed/roi-4
+2025-09-12 12:29:29,440 - app - DEBUG - Request: GET /roi_profile_feed/roi-6
+2025-09-12 12:29:29,443 - app - DEBUG - Request: GET /roi_profile_feed/roi-5
+2025-09-12 12:29:29,445 - app - DEBUG - Request: GET /roi_profile_feed/roi-7
+2025-09-12 12:29:29,447 - app - DEBUG - Request: GET /roi_profile_feed/roi-8
+2025-09-12 12:29:32,665 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 74, "y": 298, "w": 117, "h": 95}}
+2025-09-12 12:29:32,667 - app - DEBUG - Request: POST /rois
+2025-09-12 12:29:32,668 - app - DEBUG - Request data: {"x":74,"y":298,"w":117,"h":95}
+2025-09-12 12:29:32,668 - app - INFO - POST /rois: Creating ROI with data: {'x': 74, 'y': 298, 'w': 117, 'h': 95}
+2025-09-12 12:29:32,669 - app - INFO - ROI created successfully: {'id': 'roi-10', 'x': 74, 'y': 298, 'w': 117, 'h': 95}
+2025-09-12 12:29:35,033 - app - DEBUG - Request: GET /
+2025-09-12 12:29:35,036 - app - ERROR - [JS-ERROR] Failed to refresh ROIs | data: {"error": "TypeError: NetworkError when attempting to fetch resource."}
+2025-09-12 12:29:35,061 - app - DEBUG - Request: GET /static/app.js
+2025-09-12 12:29:35,062 - app - DEBUG - Request: GET /static/styles.css
+2025-09-12 12:29:35,070 - app - DEBUG - Request: GET /video_feed
+2025-09-12 12:29:35,080 - app - DEBUG - Request: GET /exposure
+2025-09-12 12:29:35,082 - app - DEBUG - Request: GET /colormap
+2025-09-12 12:29:35,183 - app - DEBUG - Request: GET /rois
+2025-09-12 12:29:35,184 - app - DEBUG - GET /rois: Returning 7 ROIs.
+2025-09-12 12:29:35,198 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 7, "ids": ["roi-4", "roi-5", "roi-6", "roi-7", "roi-8", "roi-9", "roi-10"]}
+2025-09-12 12:29:35,201 - app - DEBUG - Request: GET /roi_profile_feed/roi-5
+2025-09-12 12:29:35,204 - app - DEBUG - Request: GET /roi_profile_feed/roi-4
+2025-09-12 12:29:35,206 - app - DEBUG - Request: GET /roi_profile_feed/roi-6
+2025-09-12 12:29:35,209 - app - DEBUG - Request: GET /roi_profile_feed/roi-7
+2025-09-12 12:29:35,214 - app - DEBUG - Request: GET /roi_profile_feed/roi-8
+2025-09-12 12:29:49,992 - app - DEBUG - Request: POST /camera
+2025-09-12 12:29:49,992 - app - DEBUG - Request data: {"enabled":true}
+2025-09-12 12:29:49,993 - app - INFO - Camera START requested.
+2025-09-12 12:29:52,185 - app - DEBUG - Request: POST /camera
+2025-09-12 12:29:52,186 - app - DEBUG - Request data: {"enabled":false}
+2025-09-12 12:29:52,186 - app - INFO - Camera STOP requested.
+2025-09-12 12:29:53,669 - app - DEBUG - Request: GET /roi_profile_feed/roi-9

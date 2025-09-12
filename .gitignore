@@ -56,8 +56,7 @@ venv.bak/
 Thumbs.db
 Desktop.ini
 
-# Logs
-*.log
+
 
 # Generated artifacts
 *.zip
