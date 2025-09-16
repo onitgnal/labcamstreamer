@@ -105,6 +105,7 @@ class FakeCamera:
         # --- Internal State ---
         self._rng = np.random.default_rng(self.random_seed)
         self._beams = []
+        self._static_gradient: Optional[np.ndarray] = None
         self._features = {
             "ExposureTime": FakeFeature("ExposureTime", 10000.0, 1000.0, 50000.0),
             "Gain": FakeFeature("Gain", 0.0, 0.0, 20.0)
@@ -136,6 +137,7 @@ class FakeCamera:
         self._handler = handler
         self._running = True
         self._initialize_beams()
+        self._initialize_static_gradient()
         self._thread = threading.Thread(target=self._generate_frames, daemon=True)
         self._thread.start()
 
@@ -162,6 +164,17 @@ class FakeCamera:
                 'amplitude': self._rng.uniform(self.amplitude_range[0], self.amplitude_range[1]),
                 'cov_matrix': self._create_covariance_matrix(sx, sy, angle)
             })
+
+    def _initialize_static_gradient(self):
+        """Generates a low-frequency gradient pattern that remains static for the session."""
+        y_coords, x_coords = np.mgrid[0:self.height, 0:self.width]
+        # Lower frequency for a smoother, larger-scale gradient.
+        # The frequency is proportional to 1/dimension, so the wavelength is on the order of the image size.
+        grad_y_freq = self._rng.uniform(0.2, 0.7) / self.height
+        grad_x_freq = self._rng.uniform(0.2, 0.7) / self.width
+        gradient = (np.sin(y_coords * grad_y_freq * 2 * np.pi) *
+                    np.cos(x_coords * grad_x_freq * 2 * np.pi))
+        self._static_gradient = gradient * self.background_gradient_strength
 
     def _create_covariance_matrix(self, sx, sy, angle):
         cos_a, sin_a = np.cos(angle), np.sin(angle)
@@ -202,11 +215,8 @@ class FakeCamera:
             frame += self._rng.normal(0, self.noise_level, frame.shape)
 
             # 3. Background Gradient
-            grad_y_freq = self._rng.uniform(0.5, 1.5) / self.height
-            grad_x_freq = self._rng.uniform(0.5, 1.5) / self.width
-            gradient = (np.sin(y_coords * grad_y_freq * 2 * np.pi) *
-                        np.cos(x_coords * grad_x_freq * 2 * np.pi))
-            frame += gradient * self.background_gradient_strength
+            if self._static_gradient is not None:
+                frame += self._static_gradient
 
             # 4. Synthetic Beams
             self._update_beams()
