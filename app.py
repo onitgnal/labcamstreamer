@@ -37,14 +37,17 @@ def setup_logging(dev_mode=False):
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
 
+    # The Flask app's logger is configured here.
+    # Any component holding a reference to app.logger will see the updates.
     app.logger.addHandler(handler)
     app.logger.setLevel(log_level)
     app.logger.info("Application starting up...")
     if dev_mode:
         app.logger.info("Development mode enabled.")
 
-# Global services
-cam_service = CameraService()
+# ----- Global services -----
+# Instantiate services globally. The logger will be configured later in the main block.
+cam_service = CameraService(logger=app.logger)
 roi_registry = ROIRegistry()
 metrics = MetricsComputer()
 _plot_lock = threading.Lock()
@@ -93,14 +96,11 @@ def _placeholder(text: str, size=(640, 360)) -> np.ndarray:
 
 @app.before_request
 def log_request_info():
-    # Reduce log spam by ignoring frequent requests and logging others at DEBUG level
     if request.path in ['/log/js', '/metrics']:
         return
-
     app.logger.debug(f"Request: {request.method} {request.path}")
     if request.data and request.path != '/log/js':
         try:
-            # Attempt to decode as utf-8, but don't fail if it's binary data
             decoded_data = request.data.decode('utf-8')
             app.logger.debug(f"Request data: {decoded_data}")
         except UnicodeDecodeError:
@@ -118,12 +118,11 @@ def log_js_message():
     log_message = f"[JS-{level}] {msg.get('message', '')}"
     if 'data' in msg:
         log_message += f" | data: {json.dumps(msg['data'])}"
-
     log_func = getattr(app.logger, level.lower(), app.logger.info)
     log_func(log_message)
     return jsonify(success=True)
 
-# Keep existing MJPEG endpoint
+# Video stream
 @app.route("/video_feed")
 def video_feed():
     return mjpeg_response(cam_service.gen_overview_mjpeg())
@@ -131,7 +130,6 @@ def video_feed():
 # Exposure GET/POST
 @app.route("/exposure", methods=["GET", "POST"])
 def exposure():
-    # ... (omitted for brevity, no changes)
     if request.method == "GET":
         try:
             val = cam_service.get_exposure_us()
@@ -152,7 +150,6 @@ def exposure():
 # Colormap GET/POST
 @app.route("/colormap", methods=["GET", "POST"])
 def colormap():
-    # ... (omitted for brevity, no changes)
     if request.method == "GET":
         return jsonify({"value": cam_service.get_colormap()})
     data = request.get_json(silent=True) or {}
@@ -163,17 +160,23 @@ def colormap():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+# Camera List
+@app.route("/cameras")
+def list_cameras():
+    cameras = cam_service.list_available_cameras()
+    return jsonify(cameras)
+
 # Camera On/Off
 @app.route("/camera", methods=["POST"])
 def camera_toggle():
-    # ... (omitted for brevity, no changes)
     data = request.get_json(silent=True) or {}
     enabled = bool(data.get("enabled", False))
+    camera_id = data.get("camera_id")
     err = None
     try:
         if enabled:
-            app.logger.info("Camera START requested.")
-            cam_service.start()
+            app.logger.info(f"Camera START requested for ID: {camera_id}")
+            cam_service.start(camera_id)
         else:
             app.logger.info("Camera STOP requested.")
             cam_service.stop()
@@ -186,66 +189,38 @@ def camera_toggle():
 @app.route("/rois", methods=["GET", "POST"])
 def rois():
     if request.method == "GET":
-        roi_list = roi_registry.list_dicts()
-        app.logger.debug(f"GET /rois: Returning {len(roi_list)} ROIs.")
-        return jsonify(roi_list)
-
-    # POST create
+        return jsonify(roi_registry.list_dicts())
     data = request.get_json(silent=True) or {}
-    app.logger.info(f"POST /rois: Creating ROI with data: {data}")
     try:
-        x = int(data.get("x")); y = int(data.get("y")); w = int(data.get("w")); h = int(data.get("h"))
+        x, y, w, h = int(data["x"]), int(data["y"]), int(data["w"]), int(data["h"])
     except Exception:
-        app.logger.warning("Invalid ROI data received for creation.")
         return jsonify({"error": "Invalid ROI"}), 400
-
     roi = roi_registry.create(x, y, w, h, cam_service.get_frame_size())
-    app.logger.info(f"ROI created successfully: {roi.to_dict()}")
     return jsonify(roi.to_dict())
 
 @app.route("/rois/<rid>", methods=["GET", "PUT", "DELETE"])
 def rois_item(rid: str):
     if request.method == "GET":
         r = roi_registry.get_dict(rid)
-        if not r:
-            return jsonify({"error": "Not found"}), 404
-        return jsonify(r)
+        return jsonify(r) if r else (jsonify({"error": "Not found"}), 404)
 
     if request.method == "DELETE":
-        app.logger.info(f"DELETE /rois/{rid}: Deleting ROI.")
         ok = roi_registry.delete(rid)
-        if ok:
-            app.logger.info(f"ROI {rid} deleted from registry.")
-            metrics.remove_roi_metrics(rid)
-            app.logger.info(f"Metrics for ROI {rid} removed.")
-        else:
-            app.logger.warning(f"Attempted to delete non-existent ROI {rid}.")
+        if ok: metrics.remove_roi_metrics(rid)
         return jsonify({"deleted": bool(ok)})
 
-    # PUT update
     data = request.get_json(silent=True) or {}
-    app.logger.info(f"PUT /rois/{rid}: Updating ROI with data: {data}")
     try:
-        x = int(data.get("x"))
-        y = int(data.get("y"))
-        w = int(data.get("w"))
-        h = int(data.get("h"))
-    except (TypeError, ValueError):
-        app.logger.warning(f"Invalid ROI data received for update on ROI {rid}.")
+        x, y, w, h = int(data["x"]), int(data["y"]), int(data["w"]), int(data["h"])
+    except Exception:
         return jsonify({"error": "Invalid ROI"}), 400
-
     r = roi_registry.update(rid, x, y, w, h, cam_service.get_frame_size())
-    if not r:
-        return jsonify({"error": "Not found"}), 404
-    return jsonify(r.to_dict())
+    return jsonify(r.to_dict()) if r else (jsonify({"error": "Not found"}), 404)
 
 @app.route("/roi/<rid>/reset_max_values", methods=["POST"])
 def roi_reset_max_values(rid: str):
-    app.logger.info(f"POST /roi/{rid}/reset_max_values: Resetting max values for ROI.")
     metrics.reset_max_values(rid)
     return jsonify({"ok": True})
-
-# ... (rest of the file is the same, omitted for brevity) ...
 
 # Metrics polling
 @app.route("/metrics")
@@ -340,7 +315,6 @@ def roi_profile_feed(rid: str):
 # Save bundle (JSON + PNG inside a ZIP)
 @app.route("/save_bundle")
 def save_bundle():
-    # ... (omitted for brevity, no changes)
     base = request.args.get("base", "").strip()
     if not base:
         return jsonify({"error": "Missing base"}), 400
@@ -375,10 +349,18 @@ def save_bundle():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Flask-based camera streamer.")
     parser.add_argument("--dev", action="store_true", help="Enable development mode (logging to file, port 5001).")
+    parser.add_argument("--camera_id", type=str, help="Default camera ID to use.")
     args = parser.parse_args()
 
     port = 5001 if args.dev else 5000
+
+    # Setup logging first. cam_service was already instantiated with app.logger,
+    # so it will pick up this configuration.
     setup_logging(dev_mode=args.dev)
+
+    # Set the default camera ID from command-line args, if provided.
+    if args.camera_id:
+        cam_service.set_default_camera_id(args.camera_id)
 
     app.logger.info(f"Starting server on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

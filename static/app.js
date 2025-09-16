@@ -8,6 +8,7 @@
   const ctx = canvas.getContext('2d');
 
   const cameraToggle = qs('#cameraToggle');
+  const cameraSelect = qs('#cameraSelect');
   const saveBtn = qs('#saveBtn');
 
   const expSlider = qs('#expSlider');
@@ -507,6 +508,33 @@
   });
 
   // ----- Controls wiring -----
+  async function syncCameraList() {
+    try {
+      const cameras = await getJSON('/cameras');
+      cameraSelect.innerHTML = '';
+      if (!cameras || cameras.length === 0) {
+        cameraSelect.disabled = true;
+        cameraToggle.disabled = true;
+        const opt = document.createElement('option');
+        opt.textContent = 'No cameras found';
+        cameraSelect.appendChild(opt);
+        return;
+      }
+      cameraSelect.disabled = false;
+      cameraToggle.disabled = false;
+      for (const cam of cameras) {
+        const opt = document.createElement('option');
+        opt.value = cam.id;
+        opt.textContent = cam.name;
+        cameraSelect.appendChild(opt);
+      }
+    } catch (e) {
+      logToServer('error', 'Failed to get camera list', { error: e.toString() });
+      cameraSelect.disabled = true;
+      cameraToggle.disabled = true;
+    }
+  }
+
   async function syncControls() {
     try {
       const [exp, cm] = await Promise.all([ getJSON('/exposure'), getJSON('/colormap') ]);
@@ -542,12 +570,22 @@
 
   cameraToggle.addEventListener('change', async () => {
     const enabled = cameraToggle.checked;
+    const cameraId = cameraSelect.value;
+    cameraSelect.disabled = enabled; // Disable selector when camera is on
     try {
-      const res = await postJSON('/camera', { enabled });
-      cameraToggle.checked = !!res.enabled;
-      stream.src = enabled ? '/video_feed?ts=' + Date.now() : '';
-    } catch (_) {
+      const res = await postJSON('/camera', { enabled, camera_id: cameraId });
+      const success = !!res.enabled;
+      cameraToggle.checked = success;
+      cameraSelect.disabled = success;
+      stream.src = success ? '/video_feed?ts=' + Date.now() : '';
+      if (!success && res.error) {
+        logToServer('error', 'Failed to toggle camera', { error: res.error });
+        alert(`Error: ${res.error}`);
+      }
+    } catch (e) {
+      logToServer('error', 'Failed to toggle camera', { error: e.toString() });
       cameraToggle.checked = !enabled;
+      cameraSelect.disabled = !enabled;
     }
   });
 
@@ -585,8 +623,11 @@
 
   // ----- Bootstrap -----
   (async function init() {
-    await syncControls();
-    await refreshRois();
+    await Promise.all([
+      syncControls(),
+      syncCameraList(),
+      refreshRois()
+    ]);
     pollMetrics();
     if (stream.complete) {
       state.naturalW = stream.naturalWidth || state.naturalW;

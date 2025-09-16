@@ -1,13 +1,16 @@
+import logging
 import os
 import threading
 import time
 from queue import Queue
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union, List, Dict
 
 import cv2
 import numpy as np
 from vmbpy import (VmbSystem, VmbFeatureError, VmbCameraError, PixelFormat, COLOR_PIXEL_FORMATS,
                    MONO_PIXEL_FORMATS, FrameStatus, Camera, Stream, Frame, intersect_pixel_formats)
+
+from fake_camera import FakeCamera, FakeFrame
 
 # Camera display pixel format for OpenCV/JPEG
 OPENCV_DISPLAY_FORMAT = PixelFormat.Bgr8
@@ -76,7 +79,7 @@ class CameraService:
         def __init__(self, service: "CameraService"):
             self.service = service
 
-        def __call__(self, cam: Camera, stream: Stream, frame: Frame):
+        def __call__(self, cam: Union[Camera, FakeCamera], stream: Optional[Stream], frame: Union[Frame, FakeFrame]):
             try:
                 if frame.get_status() == FrameStatus.Complete:
                     # Convert to BGR8 if needed for OpenCV/JPEG
@@ -105,13 +108,17 @@ class CameraService:
                     except Exception:
                         pass
             finally:
-                # Re-queue the frame for next acquisition
-                cam.queue_frame(frame)
+                # Re-queue the frame for next acquisition (only for real cameras)
+                if isinstance(cam, Camera) and isinstance(frame, Frame):
+                    cam.queue_frame(frame)
 
-    def __init__(self, camera_id: Optional[str] = None):
-        self._camera_id = camera_id or os.environ.get("CAMERA_ID")
+    def __init__(self, logger: logging.Logger, default_camera_id: Optional[str] = None):
+        self._logger = logger
+        self._default_camera_id = default_camera_id or os.environ.get("CAMERA_ID")
+        self._active_camera_id: Optional[str] = None
+
         self._vmb: Optional[VmbSystem] = None
-        self._cam: Optional[Camera] = None
+        self._cam: Optional[Union[Camera, FakeCamera]] = None
         self._handler = CameraService._Handler(self)
 
         self._running = False
@@ -127,89 +134,108 @@ class CameraService:
         self._latest_gray: Optional[np.ndarray] = None
         self._colormap: str = "jet"
 
+    def set_default_camera_id(self, camera_id: str):
+        self._logger.info(f"Default camera ID set to: {camera_id}")
+        self._default_camera_id = camera_id
+
     # ---------- Lifecycle ----------
 
-    def start(self) -> None:
+    def list_available_cameras(self) -> List[Dict[str, str]]:
+        """Lists all available physical cameras and adds the FakeCamera option."""
+        cameras = [{"id": "fake", "name": "Fake Camera"}]
+        try:
+            with VmbSystem.get_instance() as vmb:
+                real_cams = vmb.get_all_cameras()
+                for cam in real_cams:
+                    cameras.append({"id": cam.get_id(), "name": cam.get_name()})
+        except Exception as e:
+            self._logger.error(f"Could not list VmbPy cameras: {e}", exc_info=True)
+        return cameras
+
+    def start(self, camera_id: Optional[str] = None) -> None:
         if self._running:
             return
 
-        # Enter VmbSystem context
-        self._vmb = VmbSystem.get_instance()
-        self._vmb.__enter__()  # keep context open
+        target_camera_id = camera_id or self._default_camera_id
+        self._logger.info(f"Attempting to start camera: {target_camera_id}")
 
-        # Pick camera (try preferred id, fall back to first available)
+        if not target_camera_id:
+            # If no camera is specified at all (not in UI, not in args), try to find one.
+            try:
+                with VmbSystem.get_instance() as vmb:
+                    available_cams = vmb.get_all_cameras()
+                    if available_cams:
+                        target_camera_id = available_cams[0].get_id()
+                        self._logger.info(f"No camera specified, defaulting to first found: {target_camera_id}")
+                    else:
+                        # If no real cameras, default to fake one
+                        target_camera_id = "fake"
+                        self._logger.info("No real cameras found, defaulting to Fake Camera.")
+            except Exception:
+                target_camera_id = "fake"
+                self._logger.info("VmbPy not available, defaulting to Fake Camera.")
+
+
+        if target_camera_id == "fake":
+            self._logger.info("Initializing FakeCamera...")
+            cam = FakeCamera(camera_id="fake", logger=self._logger)
+            self._cam = cam
+            self._cam.__enter__()
+            self._cam.start_streaming(handler=self._handler)
+            self._active_camera_id = "fake"
+            self._running = True
+            self._logger.info("FakeCamera started.")
+            return
+
+        # --- Real VmbPy Camera Logic ---
+        self._vmb = VmbSystem.get_instance()
+        self._vmb.__enter__()
+
         cam: Optional[Camera] = None
         try:
-            if self._camera_id:
-                try:
-                    cam = self._vmb.get_camera_by_id(self._camera_id)
-                except VmbCameraError:
-                    cams = self._vmb.get_all_cameras()
-                    if not cams:
-                        raise
-                    cam = cams[0]
-            else:
-                cams = self._vmb.get_all_cameras()
-                if not cams:
-                    raise VmbCameraError("No cameras found.")
-                cam = cams[0]
+            cam = self._vmb.get_camera_by_id(target_camera_id)
         except VmbCameraError as e:
-            # Properly exit VmbSystem before raising
+            self._logger.error(f"Failed to get camera by ID '{target_camera_id}': {e}", exc_info=True)
             self._vmb.__exit__(None, None, None)
             self._vmb = None
             raise e
 
         self._cam = cam
-        # Enter camera context
+        self._active_camera_id = self._cam.get_id()
         self._cam.__enter__()
 
-        # Configure camera
         self._setup_camera(self._cam)
         self._setup_pixel_format(self._cam)
 
-        # Prime capture by queuing all frames
-        # Start streaming with handler
         self._cam.start_streaming(handler=self._handler, buffer_count=10)
         self._running = True
+        self._logger.info(f"Real camera {self._active_camera_id} started.")
 
     def stop(self) -> None:
         if not self._running:
             return
+        self._logger.info(f"Stopping camera: {self.get_camera_id()}")
         try:
             if self._cam:
-                try:
-                    self._cam.stop_streaming()
-                except Exception:
-                    pass
+                self._cam.stop_streaming()
         finally:
-            # Leave camera and Vmb contexts
             if self._cam:
-                try:
-                    self._cam.__exit__(None, None, None)
-                except Exception:
-                    pass
+                self._cam.__exit__(None, None, None)
                 self._cam = None
-
             if self._vmb:
-                try:
-                    self._vmb.__exit__(None, None, None)
-                except Exception:
-                    pass
+                self._vmb.__exit__(None, None, None)
                 self._vmb = None
 
-            # Clear queues
-            try:
-                while not self._display_queue.empty():
-                    self._display_queue.get_nowait()
-            except Exception:
-                pass
-            try:
-                while not self._metrics_signal.empty():
-                    self._metrics_signal.get_nowait()
-            except Exception:
-                pass
+            while not self._display_queue.empty():
+                try: self._display_queue.get_nowait()
+                except Exception: break
+            while not self._metrics_signal.empty():
+                try: self._metrics_signal.get_nowait()
+                except Exception: break
 
             self._running = False
+            self._active_camera_id = None
+            self._logger.info("Camera stopped.")
 
     def is_running(self) -> bool:
         return self._running
@@ -217,19 +243,16 @@ class CameraService:
     # ---------- Camera setup helpers (ported/extended from baseline) ----------
 
     def _setup_camera(self, cam: Camera) -> None:
-        # Set startup defaults: manual exposure at 1000us
         try:
-            # This handles turning ExposureAuto off
             self.set_exposure_us(1000)
         except (AttributeError, VmbFeatureError):
-            pass  # Some cameras might not have this feature
+            pass
 
         try:
             cam.BalanceWhiteAuto.set("Continuous")
         except (AttributeError, VmbFeatureError):
             pass
 
-        # Optimize GigE packet size if available
         try:
             stream = cam.get_streams()[0]
             stream.GVSPAdjustPacketSize.run()
@@ -294,7 +317,6 @@ class CameraService:
             return 0
 
         with self._exposure_lock:
-            # Ensure manual exposure
             try:
                 self._cam.ExposureAuto.set("Off")
             except (AttributeError, VmbFeatureError):
@@ -305,7 +327,6 @@ class CameraService:
             except Exception:
                 return 0
 
-            # Camera range/increment
             try:
                 min_v, max_v = feat.get_range()
             except (VmbFeatureError, TypeError, ValueError):
@@ -317,7 +338,6 @@ class CameraService:
             except (VmbFeatureError, AttributeError):
                 inc = None
 
-            # UI clamp and step
             ui_min, ui_max, ui_step = 1000, 50000, 1000
             target = max(ui_min, min(ui_max, int(requested_us)))
             target = (target // ui_step) * ui_step
@@ -370,20 +390,12 @@ class CameraService:
             return (w, h)
 
     def get_camera_id(self) -> Optional[str]:
-        # Return active camera id if available, else the configured id
-        if self._cam:
-            try:
-                return self._cam.get_id()
-            except Exception:
-                pass
-        return self._camera_id
+        return self._active_camera_id
 
     def gen_overview_mjpeg(self):
-        # Yields MJPEG frames; applies current colormap on server side
         boundary = b"--frame\r\n"
         while True:
             if not self._running:
-                # Yield placeholder at a slow rate
                 img = _placeholder_image("Camera Off")
                 with self._colormap_lock:
                     cm = self._colormap
@@ -397,7 +409,6 @@ class CameraService:
             try:
                 bgr = self._display_queue.get(timeout=1.0)
             except Exception:
-                # If queue empty, emit placeholder
                 img = _placeholder_image("Waiting for frames")
                 with self._colormap_lock:
                     cm = self._colormap
