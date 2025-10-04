@@ -44,6 +44,55 @@
         </section>
 
         <section class="panel">
+          <h2>Beam Analysis</h2>
+          <label class="row space">
+            <span>Pixel size</span>
+            <input id="baPixelSize" type="number" step="any" placeholder="e.g. 3.45" style="width:120px;" />
+          </label>
+          <label class="row space">
+            <span>Compute</span>
+            <select id="baCompute" style="flex-grow:1;">
+              <option value="both">both</option>
+              <option value="second">second</option>
+              <option value="gauss">gauss</option>
+              <option value="none">none</option>
+            </select>
+          </label>
+          <label class="row space">
+            <span>Clip negatives</span>
+            <select id="baClipNegatives" style="flex-grow:1;">
+              <option value="none">none</option>
+              <option value="zero">zero</option>
+              <option value="otsu">otsu</option>
+            </select>
+          </label>
+          <label class="row space">
+            <span>Angle clip mode</span>
+            <select id="baAngleClip" style="flex-grow:1;">
+              <option value="same">same</option>
+              <option value="none">none</option>
+              <option value="zero">zero</option>
+              <option value="otsu">otsu</option>
+            </select>
+          </label>
+          <label class="row space">
+            <span>Background subtraction</span>
+            <input id="baBackground" type="checkbox" />
+          </label>
+          <label class="row space">
+            <span>Rotation</span>
+            <select id="baRotation" style="flex-grow:1;">
+              <option value="auto">auto</option>
+              <option value="fixed">fixed</option>
+            </select>
+          </label>
+          <label class="row space">
+            <span>Fixed angle (deg)</span>
+            <input id="baFixedAngle" type="number" step="any" placeholder="0.0" style="width:120px;" />
+          </label>
+        </section>
+
+        <section class="panel">
           <h2>ROIs</h2>
           <div id="roiHint" class="hint">Add by dragging on the live view. Drag to move. Resize using handles.</div>
           <div id="roiList" class="roi-list"></div>

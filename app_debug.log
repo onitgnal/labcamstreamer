@@ -1,3 +1,339 @@
-2025-09-16 07:45:07,262 - app - INFO - Application starting up...
-2025-09-16 07:45:07,262 - app - INFO - Development mode enabled.
-2025-09-16 07:45:07,262 - app - INFO - Starting server on port 5001...
+2025-10-05 01:10:19,097 - app - INFO - Application starting up...
+2025-10-05 01:10:19,097 - app - INFO - Starting server on port 5000...
+2025-10-05 01:10:35,958 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 0, "ids": []}
+2025-10-05 01:10:36,154 - app - ERROR - Could not list VmbPy cameras: Encountered an error loading Transport Layers during VmbStartup
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 500, in _startup
+    call_vmb_c('VmbStartup', _as_vmb_file_path(self.__path_configuration))
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 907, in call_vmb_c
+    getattr(_lib_instance, func_name)(*args)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 826, in _eval_vmberror
+    raise VmbCError(result)
+vmbpy.c_binding.vmb_common.VmbCError: VmbCError(<VmbError.NoTL: -16>)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\camera_service.py", line 147, in list_available_cameras
+    with VmbSystem.get_instance() as vmb:
+         ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 86, in __enter__
+    self._startup()
+    ~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\context_decorator.py", line 50, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 511, in _startup
+    raise Exc(msg) from e
+vmbpy.error.VmbTransportLayerError: Encountered an error loading Transport Layers during VmbStartup
+2025-10-05 01:10:37,259 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:10:37,259 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:10:37,260 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:10:37,260 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:10:37,393 - app - INFO - FakeCamera started.
+2025-10-05 01:10:37,992 - app - INFO - Frame size changed to (1280, 1024). Clamping ROIs.
+2025-10-05 01:10:43,075 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 403, "y": 453, "w": 277, "h": 241}}
+2025-10-05 01:10:43,199 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 1, "ids": ["roi-1"]}
+2025-10-05 01:11:21,133 - app - INFO - Camera STOP requested.
+2025-10-05 01:11:21,135 - app - INFO - Stopping camera: fake
+2025-10-05 01:11:21,141 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:11:21,675 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:11:21,681 - app - INFO - Camera stopped.
+2025-10-05 01:11:22,448 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:11:22,448 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:11:22,449 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:11:22,449 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:11:22,618 - app - INFO - FakeCamera started.
+2025-10-05 01:11:26,396 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 1, "ids": ["roi-1"]}
+2025-10-05 01:11:28,397 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 1, "ids": ["roi-1"]}
+2025-10-05 01:11:29,834 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 454, "y": 431, "w": 222, "h": 162}}
+2025-10-05 01:11:29,910 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 2, "ids": ["roi-1", "roi-2"]}
+2025-10-05 01:11:39,669 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 433, "y": 165, "w": 132, "h": 84}}
+2025-10-05 01:11:39,839 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 3, "ids": ["roi-1", "roi-2", "roi-3"]}
+2025-10-05 01:12:06,689 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 3, "ids": ["roi-1", "roi-2", "roi-3"]}
+2025-10-05 01:12:06,859 - app - ERROR - Could not list VmbPy cameras: Encountered an error loading Transport Layers during VmbStartup
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 500, in _startup
+    call_vmb_c('VmbStartup', _as_vmb_file_path(self.__path_configuration))
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 907, in call_vmb_c
+    getattr(_lib_instance, func_name)(*args)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 826, in _eval_vmberror
+    raise VmbCError(result)
+vmbpy.c_binding.vmb_common.VmbCError: VmbCError(<VmbError.NoTL: -16>)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\camera_service.py", line 147, in list_available_cameras
+    with VmbSystem.get_instance() as vmb:
+         ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 86, in __enter__
+    self._startup()
+    ~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\context_decorator.py", line 50, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 511, in _startup
+    raise Exc(msg) from e
+vmbpy.error.VmbTransportLayerError: Encountered an error loading Transport Layers during VmbStartup
+2025-10-05 01:12:13,310 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:12:14,344 - app - INFO - Camera STOP requested.
+2025-10-05 01:12:14,345 - app - INFO - Stopping camera: fake
+2025-10-05 01:12:14,346 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:12:14,368 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:12:14,372 - app - INFO - Camera stopped.
+2025-10-05 01:12:15,649 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:12:15,649 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:12:15,650 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:12:15,651 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:12:15,830 - app - INFO - FakeCamera started.
+2025-10-05 01:12:41,575 - app - INFO - Camera STOP requested.
+2025-10-05 01:12:41,576 - app - INFO - Stopping camera: fake
+2025-10-05 01:12:41,578 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:12:42,289 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:12:42,293 - app - INFO - Camera stopped.
+2025-10-05 01:12:42,555 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:12:42,556 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:12:42,557 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:12:42,558 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:12:42,740 - app - INFO - FakeCamera started.
+2025-10-05 01:12:46,170 - app - INFO - [JS-INFO] Attempting to delete ROI | data: {"roiId": "roi-3"}
+2025-10-05 01:12:47,002 - app - INFO - [JS-INFO] Attempting to delete ROI | data: {"roiId": "roi-2"}
+2025-10-05 01:12:48,297 - app - INFO - [JS-INFO] Attempting to delete ROI | data: {"roiId": "roi-1"}
+2025-10-05 01:12:50,130 - app - ERROR - [JS-ERROR] Failed to refresh ROIs | data: {"error": "TypeError: NetworkError when attempting to fetch resource."}
+2025-10-05 01:12:50,132 - app - ERROR - [JS-ERROR] Failed to refresh ROIs | data: {"error": "TypeError: NetworkError when attempting to fetch resource."}
+2025-10-05 01:12:50,137 - app - ERROR - [JS-ERROR] Failed to refresh ROIs | data: {"error": "TypeError: NetworkError when attempting to fetch resource."}
+2025-10-05 01:12:50,387 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 0, "ids": []}
+2025-10-05 01:12:50,541 - app - ERROR - Could not list VmbPy cameras: Encountered an error loading Transport Layers during VmbStartup
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 500, in _startup
+    call_vmb_c('VmbStartup', _as_vmb_file_path(self.__path_configuration))
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 907, in call_vmb_c
+    getattr(_lib_instance, func_name)(*args)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 826, in _eval_vmberror
+    raise VmbCError(result)
+vmbpy.c_binding.vmb_common.VmbCError: VmbCError(<VmbError.NoTL: -16>)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\camera_service.py", line 147, in list_available_cameras
+    with VmbSystem.get_instance() as vmb:
+         ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 86, in __enter__
+    self._startup()
+    ~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\context_decorator.py", line 50, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 511, in _startup
+    raise Exc(msg) from e
+vmbpy.error.VmbTransportLayerError: Encountered an error loading Transport Layers during VmbStartup
+2025-10-05 01:12:52,128 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:12:53,354 - app - INFO - Camera STOP requested.
+2025-10-05 01:12:53,355 - app - INFO - Stopping camera: fake
+2025-10-05 01:12:53,355 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:12:54,080 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:12:54,082 - app - INFO - Camera stopped.
+2025-10-05 01:12:54,576 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:12:54,576 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:12:54,576 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:12:54,577 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:12:54,696 - app - INFO - FakeCamera started.
+2025-10-05 01:12:56,084 - app - INFO - Camera STOP requested.
+2025-10-05 01:12:56,084 - app - INFO - Stopping camera: fake
+2025-10-05 01:12:56,085 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:12:56,120 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:12:56,121 - app - INFO - Camera stopped.
+2025-10-05 01:12:56,749 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:12:56,749 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:12:56,750 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:12:56,750 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:12:56,883 - app - INFO - FakeCamera started.
+2025-10-05 01:12:58,330 - app - INFO - Camera STOP requested.
+2025-10-05 01:12:58,330 - app - INFO - Stopping camera: fake
+2025-10-05 01:12:58,330 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:12:58,541 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:12:58,547 - app - INFO - Camera stopped.
+2025-10-05 01:12:59,008 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:12:59,008 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:12:59,009 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:12:59,009 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:12:59,122 - app - INFO - FakeCamera started.
+2025-10-05 01:13:00,393 - app - INFO - Camera STOP requested.
+2025-10-05 01:13:00,393 - app - INFO - Stopping camera: fake
+2025-10-05 01:13:00,394 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:13:00,775 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:13:00,776 - app - INFO - Camera stopped.
+2025-10-05 01:13:01,208 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:13:01,209 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:13:01,209 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:13:01,210 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:13:01,345 - app - INFO - FakeCamera started.
+2025-10-05 01:13:02,703 - app - INFO - Camera STOP requested.
+2025-10-05 01:13:02,703 - app - INFO - Stopping camera: fake
+2025-10-05 01:13:02,704 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:13:03,022 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:13:03,023 - app - INFO - Camera stopped.
+2025-10-05 01:13:03,549 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:13:03,549 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:13:03,550 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:13:03,550 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:13:03,688 - app - INFO - FakeCamera started.
+2025-10-05 01:13:06,634 - app - INFO - Camera STOP requested.
+2025-10-05 01:13:06,634 - app - INFO - Stopping camera: fake
+2025-10-05 01:13:06,635 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:13:07,270 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:13:07,271 - app - INFO - Camera stopped.
+2025-10-05 01:13:07,773 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:13:07,773 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:13:07,774 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:13:07,775 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:13:07,940 - app - INFO - FakeCamera started.
+2025-10-05 01:13:09,709 - app - INFO - Camera STOP requested.
+2025-10-05 01:13:09,709 - app - INFO - Stopping camera: fake
+2025-10-05 01:13:09,709 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:13:09,983 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:13:09,984 - app - INFO - Camera stopped.
+2025-10-05 01:13:10,480 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:13:10,481 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:13:10,481 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:13:10,482 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:13:10,580 - app - INFO - FakeCamera started.
+2025-10-05 01:13:11,796 - app - INFO - Camera STOP requested.
+2025-10-05 01:13:11,796 - app - INFO - Stopping camera: fake
+2025-10-05 01:13:11,797 - app - INFO - FakeCamera: Stopping stream...
+2025-10-05 01:13:11,807 - app - INFO - FakeCamera: Stream stopped.
+2025-10-05 01:13:11,809 - app - INFO - Camera stopped.
+2025-10-05 01:13:12,334 - app - INFO - Camera START requested for ID: fake
+2025-10-05 01:13:12,334 - app - INFO - Attempting to start camera: fake
+2025-10-05 01:13:12,335 - app - INFO - Initializing FakeCamera...
+2025-10-05 01:13:12,335 - app - INFO - FakeCamera: Starting stream...
+2025-10-05 01:13:12,534 - app - INFO - FakeCamera started.
+2025-10-05 01:13:16,266 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 63, "y": 105, "w": 241, "h": 185}}
+2025-10-05 01:13:16,417 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 1, "ids": ["roi-4"]}
+2025-10-05 01:13:18,769 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 740, "y": 20, "w": 149, "h": 124}}
+2025-10-05 01:13:18,920 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 2, "ids": ["roi-4", "roi-5"]}
+2025-10-05 01:13:21,361 - app - INFO - [JS-INFO] Attempting to create ROI | data: {"rect": {"x": 1060, "y": 187, "w": 128, "h": 128}}
+2025-10-05 01:13:21,478 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 3, "ids": ["roi-4", "roi-5", "roi-6"]}
+2025-10-05 01:14:35,276 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 3, "ids": ["roi-4", "roi-5", "roi-6"]}
+2025-10-05 01:14:35,434 - app - ERROR - Could not list VmbPy cameras: Encountered an error loading Transport Layers during VmbStartup
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 500, in _startup
+    call_vmb_c('VmbStartup', _as_vmb_file_path(self.__path_configuration))
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 907, in call_vmb_c
+    getattr(_lib_instance, func_name)(*args)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 826, in _eval_vmberror
+    raise VmbCError(result)
+vmbpy.c_binding.vmb_common.VmbCError: VmbCError(<VmbError.NoTL: -16>)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\camera_service.py", line 147, in list_available_cameras
+    with VmbSystem.get_instance() as vmb:
+         ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 86, in __enter__
+    self._startup()
+    ~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\context_decorator.py", line 50, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 511, in _startup
+    raise Exc(msg) from e
+vmbpy.error.VmbTransportLayerError: Encountered an error loading Transport Layers during VmbStartup
+2025-10-05 01:14:47,932 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 3, "ids": ["roi-4", "roi-5", "roi-6"]}
+2025-10-05 01:14:48,136 - app - ERROR - Could not list VmbPy cameras: Encountered an error loading Transport Layers during VmbStartup
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 500, in _startup
+    call_vmb_c('VmbStartup', _as_vmb_file_path(self.__path_configuration))
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 907, in call_vmb_c
+    getattr(_lib_instance, func_name)(*args)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 826, in _eval_vmberror
+    raise VmbCError(result)
+vmbpy.c_binding.vmb_common.VmbCError: VmbCError(<VmbError.NoTL: -16>)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\camera_service.py", line 147, in list_available_cameras
+    with VmbSystem.get_instance() as vmb:
+         ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 86, in __enter__
+    self._startup()
+    ~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\context_decorator.py", line 50, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 511, in _startup
+    raise Exc(msg) from e
+vmbpy.error.VmbTransportLayerError: Encountered an error loading Transport Layers during VmbStartup
+2025-10-05 01:14:55,207 - app - INFO - [JS-INFO] Refreshed ROI list from server | data: {"count": 3, "ids": ["roi-4", "roi-5", "roi-6"]}
+2025-10-05 01:14:55,309 - app - ERROR - Could not list VmbPy cameras: Encountered an error loading Transport Layers during VmbStartup
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 500, in _startup
+    call_vmb_c('VmbStartup', _as_vmb_file_path(self.__path_configuration))
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 907, in call_vmb_c
+    getattr(_lib_instance, func_name)(*args)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\c_binding\vmb_c.py", line 826, in _eval_vmberror
+    raise VmbCError(result)
+vmbpy.c_binding.vmb_common.VmbCError: VmbCError(<VmbError.NoTL: -16>)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\tinol\Git\labcamstreamer\camera_service.py", line 147, in list_available_cameras
+    with VmbSystem.get_instance() as vmb:
+         ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 86, in __enter__
+    self._startup()
+    ~~~~~~~~~~~~~^^
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\tracer.py", line 146, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\util\context_decorator.py", line 50, in wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\tinol\Git\labcamstreamer\.pixi\envs\default\Lib\site-packages\vmbpy\vmbsystem.py", line 511, in _startup
+    raise Exc(msg) from e
+vmbpy.error.VmbTransportLayerError: Encountered an error loading Transport Layers during VmbStartup
+2025-10-05 01:15:13,313 - app - WARNING - beam_analysis pool failure, falling back sequential: A process in the process pool was terminated abruptly while the future was running or pending.

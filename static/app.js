@@ -15,6 +15,15 @@
   const expLabel = qs('#expLabel');
   const cmSelect = qs('#colormapSelect');
 
+  // Beam analysis controls
+  const baPixelSize = qs('#baPixelSize');
+  const baCompute = qs('#baCompute');
+  const baClipNegatives = qs('#baClipNegatives');
+  const baAngleClip = qs('#baAngleClip');
+  const baBackground = qs('#baBackground');
+  const baRotation = qs('#baRotation');
+  const baFixedAngle = qs('#baFixedAngle');
+
   const statsExposure = qs('#statsExposure');
   const statsFps = qs('#statsFps');
 
@@ -83,6 +92,61 @@
       logToServer('error', 'Failed to reset max for ROI', { roiId, error: e.toString() });
     }
   }
+
+  // ----- Beam options sync -----
+  async function syncBeamOptions() {
+    try {
+      const opts = await getJSON('/beam_options');
+      if (baPixelSize) baPixelSize.value = opts.pixel_size != null ? String(opts.pixel_size) : '';
+      if (baCompute) baCompute.value = opts.compute || 'both';
+      if (baClipNegatives) {
+        const clip = opts.clip_negatives;
+        let clipVal;
+        if (typeof clip === 'string') {
+          clipVal = clip.toLowerCase();
+        } else if (clip === true) {
+          clipVal = 'zero';
+        } else {
+          clipVal = 'none';
+        }
+        baClipNegatives.value = clipVal;
+      }
+      if (baAngleClip) baAngleClip.value = opts.angle_clip_mode || 'otsu';
+      if (baBackground) baBackground.checked = !!opts.background_subtraction;
+      if (baRotation) baRotation.value = opts.rotation || 'auto';
+      if (baFixedAngle) baFixedAngle.value = opts.fixed_angle != null ? String(opts.fixed_angle) : '';
+    } catch (_) {}
+  }
+
+  function postBeamOptions(patch) {
+    try {
+      postJSON('/beam_options', patch);
+    } catch (_) {}
+  }
+
+  if (baPixelSize) baPixelSize.addEventListener('change', () => {
+    const v = baPixelSize.value.trim();
+    postBeamOptions({ pixel_size: v === '' ? null : parseFloat(v) });
+  });
+  if (baCompute) baCompute.addEventListener('change', () => {
+    postBeamOptions({ compute: baCompute.value });
+  });
+  if (baClipNegatives) baClipNegatives.addEventListener('change', () => {
+    postBeamOptions({ clip_negatives: baClipNegatives.value });
+  });
+  if (baAngleClip) baAngleClip.addEventListener('change', () => {
+    postBeamOptions({ angle_clip_mode: baAngleClip.value });
+  });
+  if (baBackground) baBackground.addEventListener('change', () => {
+    postBeamOptions({ background_subtraction: !!baBackground.checked });
+  });
+  if (baRotation) baRotation.addEventListener('change', () => {
+    postBeamOptions({ rotation: baRotation.value });
+  });
+  if (baFixedAngle) baFixedAngle.addEventListener('change', () => {
+    const v = baFixedAngle.value.trim();
+    postBeamOptions({ fixed_angle: v === '' ? null : parseFloat(v) });
+  });
 
 
   // ----- Canvas sizing -----
@@ -284,11 +348,25 @@
       profileImg.alt = `Profile ${r.id}`;
       profileImg.src = `/roi_profile_feed/${encodeURIComponent(r.id)}`;
 
+      const cutsImg = document.createElement('img');
+      cutsImg.className = 'roi-cuts';
+      cutsImg.alt = `Cuts ${r.id}`;
+      cutsImg.src = `/roi_cuts_feed/${encodeURIComponent(r.id)}`;
+
       const integrationPlot = document.createElement('div');
       integrationPlot.className = 'roi-integration-plot';
-      integrationPlot.innerHTML = `<div class="bar-container"><div class="bar"></div></div><span class="label"></span>`;
+      const barContainer = document.createElement('div');
+      barContainer.className = 'bar-container';
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      const label = document.createElement('span');
+      label.className = 'label';
+      barContainer.appendChild(bar);
+      barContainer.appendChild(label);
+      integrationPlot.appendChild(barContainer);
 
       plots.appendChild(profileImg);
+      plots.appendChild(cutsImg);
       plots.appendChild(integrationPlot);
 
       const toolbar = document.createElement('div');
@@ -325,10 +403,10 @@
       if (m) {
         const yMax = yMaxMap[r.id] || 1.0;
         const pct = (m.value_per_ms / Math.max(1.0, yMax)) * 100;
-        bar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+        bar.style.height = `${Math.min(100, Math.max(0, pct))}%`;
         label.textContent = `${m.value_per_ms.toFixed(1)}/ms`;
       } else {
-        bar.style.width = '0%';
+        bar.style.height = '0%';
         label.textContent = '-';
       }
     }
@@ -626,7 +704,8 @@
     await Promise.all([
       syncControls(),
       syncCameraList(),
-      refreshRois()
+      refreshRois(),
+      syncBeamOptions()
     ]);
     pollMetrics();
     if (stream.complete) {

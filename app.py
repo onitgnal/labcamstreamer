@@ -648,23 +648,25 @@ def _roi_cuts_frames(rid: str) -> Generator[bytes, None, None]:
                             xx = np.linspace(x_positions.min(), x_positions.max(), 400)
                             yy = A * np.exp(-2.0 * ((xx - xc) / max(rx, 1e-6)) ** 2)
                             axx.plot(xx, yy, color="orange", linestyle="--", label="Gauss")
-                        half_rx_iso = max(0.0, rx_iso * 0.5)
-                        if half_rx_iso > 0.0:
-                            axx.axvline(cx_iso - half_rx_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label="2nd moment radius")
-                            axx.axvline(cx_iso + half_rx_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label=None)
+                       
+                        if rx_iso > 0.0:
+                            axx.axvline(cx_iso - rx_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label="2nd moment radius")
+                            axx.axvline(cx_iso + rx_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label=None)
                         if gauss_rx > 0.0:
                             axx.axvline(gauss_cx - gauss_rx, color="#ffaa00", linestyle="-.", linewidth=1.2, label="Gauss radius")
                             axx.axvline(gauss_cx + gauss_rx, color="#ffaa00", linestyle="-.", linewidth=1.2, label=None)
                         ann_lines = []
-                        if half_rx_iso > 0.0:
-                            msg = f"ISO: {half_rx_iso:.2f} px"
+                        if rx_iso > 0.0:
                             if pixel_size_val:
-                                msg += f" / {half_rx_iso * pixel_size_val:.3f} units"
+                                msg = f"ISO: {rx_iso * pixel_size_val:.3f}"
+                            else:
+                                msg = f"ISO: {rx_iso:.2f} px"
                             ann_lines.append(msg)
                         if gauss_rx > 0.0:
-                            msg = f"Gauss: {gauss_rx:.2f} px"
                             if pixel_size_val:
-                                msg += f" / {gauss_rx * pixel_size_val:.3f} units"
+                                msg = f"Gauss: {gauss_rx * pixel_size_val:.3f}"
+                            else:
+                                msg = f"Gauss: {gauss_rx:.2f} px"
                             ann_lines.append(msg)
                         if ann_lines:
                             axx.text(0.02, 0.95, ' | '.join(ann_lines), transform=axx.transAxes, fontsize=8, va='top', ha='left', bbox=dict(facecolor='black', alpha=0.35, pad=4))
@@ -692,23 +694,25 @@ def _roi_cuts_frames(rid: str) -> Generator[bytes, None, None]:
                             yy = np.linspace(y_positions.min(), y_positions.max(), 400)
                             zz = A * np.exp(-2.0 * ((yy - yc) / max(ry, 1e-6)) ** 2)
                             axy.plot(yy, zz, color="orange", linestyle="--", label="Gauss")
-                        half_ry_iso = max(0.0, ry_iso * 0.5)
-                        if half_ry_iso > 0.0:
-                            axy.axvline(cy_iso - half_ry_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label="2nd moment radius")
-                            axy.axvline(cy_iso + half_ry_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label=None)
+                       
+                        if ry_iso > 0.0:
+                            axy.axvline(cy_iso - ry_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label="2nd moment radius")
+                            axy.axvline(cy_iso + ry_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label=None)
                         if gauss_ry > 0.0:
                             axy.axvline(gauss_cy - gauss_ry, color="#ffaa00", linestyle="-.", linewidth=1.2, label="Gauss radius")
                             axy.axvline(gauss_cy + gauss_ry, color="#ffaa00", linestyle="-.", linewidth=1.2, label=None)
                         ann_lines_y = []
-                        if half_ry_iso > 0.0:
-                            msg = f"ISO: {half_ry_iso:.2f} px"
+                        if ry_iso > 0.0:
                             if pixel_size_val:
-                                msg += f" / {half_ry_iso * pixel_size_val:.3f} units"
+                                msg = f"ISO: {ry_iso * pixel_size_val:.3f}"
+                            else:
+                                msg = f"ISO: {ry_iso:.2f} px"
                             ann_lines_y.append(msg)
                         if gauss_ry > 0.0:
-                            msg = f"Gauss: {gauss_ry:.2f} px"
                             if pixel_size_val:
-                                msg += f" / {gauss_ry * pixel_size_val:.3f} units"
+                                msg = f"Gauss: {gauss_ry * pixel_size_val:.3f}"
+                            else:
+                                msg = f"Gauss: {gauss_ry:.2f} px"
                             ann_lines_y.append(msg)
                         if ann_lines_y:
                             axy.text(0.02, 0.95, ' | '.join(ann_lines_y), transform=axy.transAxes, fontsize=8, va='top', ha='left', bbox=dict(facecolor='black', alpha=0.35, pad=4))
