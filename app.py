@@ -355,6 +355,10 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
         h_img, w_img = img.shape[:2]
         t = np.linspace(0.0, 2.0 * np.pi, 361, dtype=np.float32)
 
+        major_color, minor_color = _COLOR_X_ISO, _COLOR_Y_ISO
+        if ry_iso > rx_iso:
+            major_color, minor_color = _COLOR_Y_ISO, _COLOR_X_ISO
+
         if compute in ("both", "second"):
             ex = cx + major_r * np.cos(t) * c - minor_r * np.sin(t) * s
             ey = cy + major_r * np.cos(t) * s + minor_r * np.sin(t) * c
@@ -363,14 +367,14 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
             ellipse_pts[:, 0] = np.clip(ellipse_pts[:, 0], 0, w_img - 1)
             ellipse_pts[:, 1] = np.clip(ellipse_pts[:, 1], 0, h_img - 1)
             ellipse_pts = np.round(ellipse_pts).astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(img, [ellipse_pts], True, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.polylines(img, [ellipse_pts], True, _COLOR_ISO_ELLIPSE, 2, cv2.LINE_AA)
 
             major_pt1 = (int(np.clip(round(cx - major_r * c), 0, w_img - 1)), int(np.clip(round(cy - major_r * s), 0, h_img - 1)))
             major_pt2 = (int(np.clip(round(cx + major_r * c), 0, w_img - 1)), int(np.clip(round(cy + major_r * s), 0, h_img - 1)))
             minor_pt1 = (int(np.clip(round(cx + minor_r * s), 0, w_img - 1)), int(np.clip(round(cy - minor_r * c), 0, h_img - 1)))
             minor_pt2 = (int(np.clip(round(cx - minor_r * s), 0, w_img - 1)), int(np.clip(round(cy + minor_r * c), 0, h_img - 1)))
-            cv2.line(img, major_pt1, major_pt2, (255, 255, 0), 2, cv2.LINE_AA)
-            cv2.line(img, minor_pt1, minor_pt2, (255, 0, 255), 2, cv2.LINE_AA)
+            cv2.line(img, major_pt1, major_pt2, major_color, 2, cv2.LINE_AA)
+            cv2.line(img, minor_pt1, minor_pt2, minor_color, 2, cv2.LINE_AA)
 
         if compute in ("both", "gauss") and g_major is not None and g_minor is not None:
             gx = cx + g_major * np.cos(t) * c - g_minor * np.sin(t) * s
@@ -380,7 +384,7 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
             g_pts[:, 0] = np.clip(g_pts[:, 0], 0, w_img - 1)
             g_pts[:, 1] = np.clip(g_pts[:, 1], 0, h_img - 1)
             g_pts = np.round(g_pts).astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(img, [g_pts], True, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.polylines(img, [g_pts], True, _COLOR_GAUSS, 2, cv2.LINE_AA)
 
         target_h = 240.0
         scale = target_h / max(1.0, float(h_img))
@@ -393,14 +397,14 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
 
 
 
-_CUTS_BG_COLOR = (29, 21, 17)
-_CUTS_AXIS_COLOR = (82, 86, 96)
-_CUTS_TEXT_COLOR = (230, 232, 236)
-_CUTS_SUBTEXT_COLOR = (190, 195, 205)
-_CUTS_LINE_COLOR_X = (226, 144, 74)
-_CUTS_LINE_COLOR_Y = (194, 227, 80)
-_CUTS_ISO_COLOR = (170, 255, 0)
-_CUTS_GAUSS_COLOR = (0, 170, 255)
+_PLOT_BG = (29, 21, 17)
+_PLOT_AXIS = (82, 86, 96)
+_PLOT_TEXT_PRI = (230, 232, 236)
+_PLOT_TEXT_SEC = (190, 195, 205)
+_COLOR_X_ISO = (226, 144, 74)
+_COLOR_Y_ISO = (194, 227, 80)
+_COLOR_GAUSS = (0, 220, 255)
+_COLOR_ISO_ELLIPSE = (255, 255, 255)
 
 def _draw_cuts_panel(
     panel: np.ndarray,
@@ -423,11 +427,11 @@ def _draw_cuts_panel(
     plot_h = max(1, h - top - bottom)
 
     origin = (left, h - bottom)
-    cv2.line(panel, origin, (w - right, h - bottom), _CUTS_AXIS_COLOR, 1, cv2.LINE_AA)
-    cv2.line(panel, origin, (left, top), _CUTS_AXIS_COLOR, 1, cv2.LINE_AA)
+    cv2.line(panel, origin, (w - right, h - bottom), _PLOT_AXIS, 1, cv2.LINE_AA)
+    cv2.line(panel, origin, (left, top), _PLOT_AXIS, 1, cv2.LINE_AA)
 
-    cv2.putText(panel, title, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.66, _CUTS_TEXT_COLOR, 1, cv2.LINE_AA)
-    cv2.putText(panel, axis_label, (left, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _CUTS_SUBTEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(panel, title, (12, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _PLOT_TEXT_PRI, 1, cv2.LINE_AA)
+    cv2.putText(panel, axis_label, (left, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _PLOT_TEXT_SEC, 1, cv2.LINE_AA)
 
     pos = np.asarray(positions, dtype=np.float32).reshape(-1)
     vals = np.asarray(values, dtype=np.float32).reshape(-1)
@@ -470,14 +474,14 @@ def _draw_cuts_panel(
     if iso_radius > 0.0:
         lx = _pos_to_x(iso_center - iso_radius)
         rx = _pos_to_x(iso_center + iso_radius)
-        cv2.line(panel, (lx, top), (lx, h - bottom), _CUTS_ISO_COLOR, 1, cv2.LINE_AA)
-        cv2.line(panel, (rx, top), (rx, h - bottom), _CUTS_ISO_COLOR, 1, cv2.LINE_AA)
+        cv2.line(panel, (lx, top), (lx, h - bottom), line_color, 1, cv2.LINE_AA)
+        cv2.line(panel, (rx, top), (rx, h - bottom), line_color, 1, cv2.LINE_AA)
 
     if gauss_radius > 0.0:
         lx = _pos_to_x(gauss_center - gauss_radius)
         rx = _pos_to_x(gauss_center + gauss_radius)
-        cv2.line(panel, (lx, top), (lx, h - bottom), _CUTS_GAUSS_COLOR, 1, cv2.LINE_AA)
-        cv2.line(panel, (rx, top), (rx, h - bottom), _CUTS_GAUSS_COLOR, 1, cv2.LINE_AA)
+        cv2.line(panel, (lx, top), (lx, h - bottom), _COLOR_GAUSS, 1, cv2.LINE_AA)
+        cv2.line(panel, (rx, top), (rx, h - bottom), _COLOR_GAUSS, 1, cv2.LINE_AA)
 
     if gauss_radius > 0.0 and gauss_amplitude > 0.0:
         samples = np.linspace(base, base + span, 256, dtype=np.float32)
@@ -489,21 +493,7 @@ def _draw_cuts_panel(
         gy = (h - bottom) - np.clip(np.round(gauss_norm * (plot_h - 1)).astype(np.int32), 0, plot_h - 1)
         g_pts = np.column_stack((gx, gy)).astype(np.int32)
         if g_pts.shape[0] >= 2:
-            cv2.polylines(panel, [g_pts.reshape(-1, 1, 2)], False, _CUTS_GAUSS_COLOR, 1, cv2.LINE_AA)
-
-    annotations = []
-    if iso_radius > 0.0:
-        if pixel_size is not None:
-            annotations.append(f"ISO {iso_radius * pixel_size:.3f}")
-        else:
-            annotations.append(f"ISO {iso_radius:.2f}px")
-    if gauss_radius > 0.0:
-        if pixel_size is not None:
-            annotations.append(f"Gauss {gauss_radius * pixel_size:.3f}")
-        else:
-            annotations.append(f"Gauss {gauss_radius:.2f}px")
-    if annotations:
-        cv2.putText(panel, ' | '.join(annotations), (left, max(20, top - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _CUTS_SUBTEXT_COLOR, 1, cv2.LINE_AA)
+            cv2.polylines(panel, [g_pts.reshape(-1, 1, 2)], False, _COLOR_GAUSS, 1, cv2.LINE_AA)
 
 
 def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
@@ -536,15 +526,24 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
         amp_x = float(fit_x.get("amplitude", 0.0)) if fit_x else 0.0
         amp_y = float(fit_y.get("amplitude", 0.0)) if fit_y else 0.0
 
-        canvas = np.full((240, 480, 3), _CUTS_BG_COLOR, dtype=np.uint8)
+        unit = "um" if pixel_size_val is not None else "px"
+        rx_iso_disp = rx_iso * (pixel_size_val or 1.0)
+        ry_iso_disp = ry_iso * (pixel_size_val or 1.0)
+        gauss_rx_disp = gauss_rx * (pixel_size_val or 1.0)
+        gauss_ry_disp = gauss_ry * (pixel_size_val or 1.0)
+
+        title_x = f"Ix | ISO:{rx_iso_disp:.2f} | G:{gauss_rx_disp:.2f} {unit}"
+        title_y = f"Iy | ISO:{ry_iso_disp:.2f} | G:{gauss_ry_disp:.2f} {unit}"
+
+        canvas = np.full((240, 480, 3), _PLOT_BG, dtype=np.uint8)
         with _plot_lock:
             _draw_cuts_panel(
                 canvas[:, :240],
                 x_positions,
                 Ix,
-                title="Ix cuts",
+                title=title_x,
                 axis_label="x (local px)",
-                line_color=_CUTS_LINE_COLOR_X,
+                line_color=_COLOR_X_ISO,
                 iso_center=cx_iso,
                 iso_radius=rx_iso,
                 gauss_amplitude=amp_x,
@@ -556,9 +555,9 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
                 canvas[:, 240:],
                 y_positions,
                 Iy,
-                title="Iy cuts",
+                title=title_y,
                 axis_label="y (local px)",
-                line_color=_CUTS_LINE_COLOR_Y,
+                line_color=_COLOR_Y_ISO,
                 iso_center=cy_iso,
                 iso_radius=ry_iso,
                 gauss_amplitude=amp_y,
@@ -566,7 +565,7 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
                 gauss_radius=gauss_ry,
                 pixel_size=pixel_size_val,
             )
-            cv2.line(canvas, (240, 24), (240, 240 - 24), _CUTS_AXIS_COLOR, 1, cv2.LINE_AA)
+            cv2.line(canvas, (240, 24), (240, 240 - 24), _PLOT_AXIS, 1, cv2.LINE_AA)
         return canvas
     except Exception as exc:
         app.logger.warning(f"compose cuts error for ROI {rid}: {exc}", exc_info=True)
