@@ -98,7 +98,7 @@ class FakeCamera:
         self.background_gradient_strength = 500.0
         self.hot_pixel_prob = 1e-6
         self.drift_position_std_dev = 0.5
-        self.drift_amplitude_std_dev = 150.0
+        self.drift_amplitude_std_dev = 20.0
         # Noise parameters for a more realistic model
         self.shot_noise_factor = 0.8  # Proportional to signal
         self.read_noise_level = 150.0 # Constant
