@@ -11,7 +11,7 @@ Capabilities:
 High-level API: analyze_beam(image) returns a dict with:
 - theta: principal-axis angle (radians)
 - rx_iso, ry_iso: second-moment radii (2*sigma)
-- cx, cy: centroid (pixels) in original image coordinates
+- cx, cy: centroid (pixels) in local coordinates of the processed ROI
 - Ix_spectrum, Iy_spectrum: (positions, intensity) tuples
 - img_for_spec, img_for_spec_origin: processed ROI (not rotated) and its origin
 - gauss_fit_x, gauss_fit_y: Gaussian fit dicts (amplitude, centre, radius, covariance)
@@ -442,9 +442,9 @@ def iso_second_moment(
     Returns
     -------
     dict
-        Keys include: ``cx``, ``cy``, ``rx``, ``ry``, ``phi``,
-        ``iterations``, ``processed_img``, ``crop_origin``,
-        ``rotated_img``, ``rotated_crop_origin``.
+        Keys include: ``cx``, ``cy`` (local to the cropped image), ``rx``,
+        ``ry``, ``phi``, ``iterations``, ``processed_img``,
+        ``crop_origin``, ``rotated_img``.
     """
     # convert to float and ensure a copy so modifications do not affect the original
     raw_img = np.asarray(img, dtype=np.float64)
@@ -697,7 +697,8 @@ def analyze_beam(
     Returns
     -------
     dict
-        See keys documented in :func:`iso_second_moment` and above.
+        Similar to :func:`iso_second_moment`, but with ``cx`` and ``cy``
+        guaranteed to be in local coordinates of the returned ``img_for_spec``.
     """
     # run ISO second‑moment analysis
     iso_result = iso_second_moment(

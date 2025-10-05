@@ -100,8 +100,8 @@ class FakeCamera:
         self.drift_position_std_dev = 0.5
         self.drift_amplitude_std_dev = 20.0
         # Noise parameters for a more realistic model
-        self.shot_noise_factor = 0.8  # Proportional to signal
-        self.read_noise_level = 150.0 # Constant
+        self.shot_noise_factor = 0.1  # Proportional to signal
+        self.read_noise_level = 25.0 # Constant
 
         # --- Internal State ---
         self._rng = np.random.default_rng(self.random_seed)
