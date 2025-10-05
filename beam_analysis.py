@@ -562,13 +562,15 @@ def iso_second_moment(
     iterations = iteration
     # Optionally rotate the final processed image to align principal axes
     rotated_img = None
-    rotated_crop_origin = None
     phi_rot = None  # rotation in the rotated image frame (expected ~0)
+
+    # cx, cy are global; convert to local for return val
+    cx_local, cy_local = (cx - crop_xmin, cy - crop_ymin)
+
     if principal_axes_rot and processed_img is not None:
         # Rotate a larger section of the background-subtracted full image so the
         # rotated data retains realistic edge noise. After rotation the image is
         # cropped back to the processed-image size for downstream analysis.
-        cx_pre_rot, cy_pre_rot = cx, cy
         h_old, w_old = processed_img.shape
         if h_old > 0 and w_old > 0:
             rot_deg = phi * 180.0 / np.pi
@@ -621,17 +623,14 @@ def iso_second_moment(
             rotated_cropped = rotated_full[start_y:end_y, start_x:end_x]
             rotated_img = rotated_cropped
 
+            # After rotation, all parameters are local to the rotated image
             rx_rot, ry_rot, cx_rot_local, cy_rot_local, phi_rot = get_beam_size(rotated_img)
             rx, ry = rx_rot, ry_rot
-            rotated_crop_origin = (
-                cy_pre_rot - cy_rot_local,
-                cx_pre_rot - cx_rot_local,
-            )
-            cx = cx_rot_local + rotated_crop_origin[1]
-            cy = cy_rot_local + rotated_crop_origin[0]
+            cx_local, cy_local = cx_rot_local, cy_rot_local
+
     return {
-        "cx": cx,
-        "cy": cy,
+        "cx": cx_local,
+        "cy": cy_local,
         "rx": rx,
         "ry": ry,
         # phi is the rotation angle of the principal axis in the original
@@ -643,7 +642,7 @@ def iso_second_moment(
         "processed_img": processed_img,
         "crop_origin": (crop_ymin, crop_xmin),
         "rotated_img": rotated_img,
-        "rotated_crop_origin": rotated_crop_origin,
+        "rotated_crop_origin": None,
     }
 
 
@@ -722,16 +721,12 @@ def analyze_beam(
 
     if rotated_img is not None and rotated_img.size > 0:
         spectrum_img = rotated_img
-        ymin_spec, xmin_spec = iso_result["rotated_crop_origin"]
-        h_spec, w_spec = spectrum_img.shape
-        x_positions = xmin_spec + np.arange(w_spec)
-        y_positions = ymin_spec + np.arange(h_spec)
     else:
         spectrum_img = processed_img
-        ymin_spec, xmin_spec = iso_result["crop_origin"]
-        h_spec, w_spec = spectrum_img.shape
-        x_positions = xmin_spec + np.arange(w_spec)
-        y_positions = ymin_spec + np.arange(h_spec)
+
+    h_spec, w_spec = spectrum_img.shape
+    x_positions = np.arange(w_spec, dtype=np.float64)
+    y_positions = np.arange(h_spec, dtype=np.float64)
 
     # store the non-rotated image for downstream consumers (e.g. plotting)
     img_for_spec = processed_img
@@ -750,16 +745,16 @@ def analyze_beam(
     if compute_gaussian:
         # initial guesses for Gaussian fit using ISO results
         # amplitude guess: max value of spectrum
-        # centre guess: ISO centroid along each axis
+        # centre guess: ISO centroid along each axis (now in local coords)
         # radius guess: second moment radii (rx, ry)
-        centre_x = iso_result["cx"]
-        centre_y = iso_result["cy"]
+        centre_x_local = iso_result["cx"]
+        centre_y_local = iso_result["cy"]
         rx = iso_result["rx"]
         ry = iso_result["ry"]
         # fit along x
-        params_x, cov_x = fit_gaussian(x_positions, Ix, (Ix.max(), centre_x, max(rx, 1e-3)))
+        params_x, cov_x = fit_gaussian(x_positions, Ix, (Ix.max(), centre_x_local, max(rx, 1e-3)))
         # fit along y
-        params_y, cov_y = fit_gaussian(y_positions, Iy, (Iy.max(), centre_y, max(ry, 1e-3)))
+        params_y, cov_y = fit_gaussian(y_positions, Iy, (Iy.max(), centre_y_local, max(ry, 1e-3)))
         gauss_fit_x = {
             "amplitude": params_x[0],
             "centre": params_x[1],
