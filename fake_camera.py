@@ -92,15 +92,16 @@ class FakeCamera:
         self.height = 1024
         self.fps = 20
         self.random_seed = int(time.time())
-        self.num_beams_range = (2, 5)
-        self.amplitude_range = (8000, 20000)
-        self.sigma_range = (20.0, 50.0)
-        self.noise_level = 500.0
-        self.background_level = 2000
-        self.background_gradient_strength = 4000.0
-        self.hot_pixel_prob = 1e-5
-        self.drift_position_std_dev = 1.5
-        self.drift_amplitude_std_dev = 300.0
+        self.amplitude_range = (15000, 30000)
+        self.sigma_range = (25.0, 60.0)
+        self.background_level = 1000
+        self.background_gradient_strength = 500.0
+        self.hot_pixel_prob = 1e-6
+        self.drift_position_std_dev = 0.5
+        self.drift_amplitude_std_dev = 150.0
+        # Noise parameters for a more realistic model
+        self.shot_noise_factor = 0.8  # Proportional to signal
+        self.read_noise_level = 150.0 # Constant
 
         # --- Internal State ---
         self._rng = np.random.default_rng(self.random_seed)
@@ -108,7 +109,6 @@ class FakeCamera:
         self._static_gradient: Optional[np.ndarray] = None
         self._features = {
             "ExposureTime": FakeFeature("ExposureTime", 10000.0, 1000.0, 50000.0),
-            "Gain": FakeFeature("Gain", 0.0, 0.0, 20.0)
         }
 
     def get_id(self) -> str:
@@ -118,13 +118,11 @@ class FakeCamera:
         return [PixelFormat.Mono16, PixelFormat.Bgr8]
 
     def set_pixel_format(self, fmt: PixelFormat):
-        # The fake camera always generates Mono16 internally, but we acknowledge the setting.
         self._logger.info(f"FakeCamera: Pixel format set to {fmt.name}")
 
     def get_feature_by_name(self, name: str) -> FakeFeature:
         if name in self._features:
             return self._features[name]
-        # Allow fallback for features like ExposureTimeAbs
         if "ExposureTime" in name:
             return self._features["ExposureTime"]
         raise AttributeError(f"Feature '{name}' not found in FakeCamera")
@@ -153,27 +151,27 @@ class FakeCamera:
         self._logger.info("FakeCamera: Stream stopped.")
 
     def _initialize_beams(self):
+        """Initializes exactly three beams in predictable locations."""
         self._beams = []
-        num_beams = self._rng.integers(self.num_beams_range[0], self.num_beams_range[1] + 1)
-        for _ in range(num_beams):
+        positions = [
+            (self.width * 0.25, self.height * 0.5),
+            (self.width * 0.5, self.height * 0.3),
+            (self.width * 0.75, self.height * 0.7),
+        ]
+        for i, pos in enumerate(positions):
             angle = self._rng.uniform(0, np.pi)
-            sx = self._rng.uniform(self.sigma_range[0], self.sigma_range[1])
-            sy = self._rng.uniform(self.sigma_range[0], self.sigma_range[1]) * 0.7
+            sx = self._rng.uniform(self.sigma_range[0], self.sigma_range[1]) * (1.0 + i * 0.1)
+            sy = sx * self._rng.uniform(0.6, 0.9)
             self._beams.append({
-                'center': (self._rng.uniform(0, self.width), self._rng.uniform(0, self.height)),
+                'center': pos,
                 'amplitude': self._rng.uniform(self.amplitude_range[0], self.amplitude_range[1]),
                 'cov_matrix': self._create_covariance_matrix(sx, sy, angle)
             })
 
     def _initialize_static_gradient(self):
-        """Generates a low-frequency gradient pattern that remains static for the session."""
+        """Generates a simpler, static, non-uniform background."""
         y_coords, x_coords = np.mgrid[0:self.height, 0:self.width]
-        # Lower frequency for a smoother, larger-scale gradient.
-        # The frequency is proportional to 1/dimension, so the wavelength is on the order of the image size.
-        grad_y_freq = self._rng.uniform(0.2, 0.7) / self.height
-        grad_x_freq = self._rng.uniform(0.2, 0.7) / self.width
-        gradient = (np.sin(y_coords * grad_y_freq * 2 * np.pi) *
-                    np.cos(x_coords * grad_x_freq * 2 * np.pi))
+        gradient = (x_coords / self.width + y_coords / self.height) * 0.5
         self._static_gradient = gradient * self.background_gradient_strength
 
     def _create_covariance_matrix(self, sx, sy, angle):
@@ -184,87 +182,83 @@ class FakeCamera:
 
     def _update_beams(self):
         for beam in self._beams:
-            # Drift position
             dx = self._rng.normal(0, self.drift_position_std_dev)
             dy = self._rng.normal(0, self.drift_position_std_dev)
             beam['center'] = (beam['center'][0] + dx, beam['center'][1] + dy)
-            # Drift amplitude
             da = self._rng.normal(0, self.drift_amplitude_std_dev)
             beam['amplitude'] = max(0, beam['amplitude'] + da)
 
-    def _generate_2d_gaussian(self, x, y, beam):
-        center = beam['center']
-        amplitude = beam['amplitude']
+    def _generate_gaussian_patch(self, beam: dict) -> Tuple[np.ndarray, Tuple[int, int]]:
+        """Generates a Gaussian beam on a smaller patch for performance."""
+        center_x, center_y = beam['center']
+        # Estimate sigma from the covariance matrix for patch size calculation
+        sx = np.sqrt(abs(beam['cov_matrix'][0, 0]))
+        sy = np.sqrt(abs(beam['cov_matrix'][1, 1]))
+        patch_half_size = int(3 * max(sx, sy)) # Use a generous patch size
+
+        x_start = max(0, int(center_x - patch_half_size))
+        x_end = min(self.width, int(center_x + patch_half_size))
+        y_start = max(0, int(center_y - patch_half_size))
+        y_end = min(self.height, int(center_y + patch_half_size))
+
+        if x_start >= x_end or y_start >= y_end:
+            return np.array([[]]), (0, 0)
+
+        y_patch, x_patch = np.mgrid[y_start:y_end, x_start:x_end]
+
         cov_inv = np.linalg.inv(beam['cov_matrix'])
-        pos = np.dstack((x, y))
-        diff = pos - center
+        pos = np.dstack((x_patch, y_patch))
+        diff = pos - beam['center']
         exponent = -0.5 * np.einsum('...k,kl,...l->...', diff, cov_inv, diff)
-        return amplitude * np.exp(exponent)
+
+        patch = beam['amplitude'] * np.exp(exponent)
+        return patch, (y_start, x_start)
 
     def _generate_frames(self):
         frame_duration = 1.0 / self.fps
-        y_coords, x_coords = np.mgrid[0:self.height, 0:self.width]
 
         while self._running:
             start_time = time.monotonic()
 
-            # 1. Base Canvas (as float32 for calculations)
-            frame = np.full((self.height, self.width), float(self.background_level), dtype=np.float32)
+            # 1. Base Canvas (ideal signal, float32 for calculations)
+            ideal_frame = np.full((self.height, self.width), float(self.background_level), dtype=np.float32)
 
-            # 2. Background Noise
-            frame += self._rng.normal(0, self.noise_level, frame.shape)
-
-            # 3. Background Gradient
+            # 2. Add static background gradient
             if self._static_gradient is not None:
-                frame += self._static_gradient
+                ideal_frame += self._static_gradient
 
-            # 4. Synthetic Beams
+            # 3. Add synthetic beams (optimized)
             self._update_beams()
             for beam in self._beams:
-                frame += self._generate_2d_gaussian(x_coords, y_coords, beam)
+                patch, (y_start, x_start) = self._generate_gaussian_patch(beam)
+                if patch.size > 0:
+                    y_end, x_end = y_start + patch.shape[0], x_start + patch.shape[1]
+                    ideal_frame[y_start:y_end, x_start:x_end] += patch
 
-            # 5. Exposure and Gain Simulation (Non-linear)
-            # This section models the non-linear effects of exposure and gain,
-            # as requested in the prompt. The simulation makes two assumptions:
-            # - Brighter parts of the image (the "signal") are affected more
-            #   by changes in exposure and gain than the darker background.
-            # - The relationship is non-linear (logarithmic) to better
-            #   simulate how real sensors might behave.
-            exposure_ms = self._features["ExposureTime"].get() / 1000.0
-            gain_db = self._features["Gain"].get()
+            # 4. Exposure Simulation (linear scaling of ideal signal)
+            exposure_us = self._features["ExposureTime"].get()
+            exposure_factor = exposure_us / 20000.0
+            exposed_frame = ideal_frame * exposure_factor
 
-            # A simple mask to separate "signal" (beams) from "background".
-            signal_mask = frame > (self.background_level + self.noise_level * 3)
+            # 5. Noise Simulation
+            shot_noise_variance = np.maximum(0, exposed_frame) * self.shot_noise_factor
+            shot_noise = self._rng.normal(0, np.sqrt(shot_noise_variance)).astype(np.float32)
+            read_noise = self._rng.normal(0, self.read_noise_level, ideal_frame.shape).astype(np.float32)
+            noisy_frame = exposed_frame + shot_noise + read_noise
 
-            # Apply gain factor, scaled to have a larger effect on the signal.
-            gain_factor = 1.0 + (10**(gain_db / 20.0) - 1.0) * 0.8
-            frame[signal_mask] *= gain_factor
-
-            # Apply exposure factor, with a much smaller effect on the background
-            # and a logarithmic response for more realistic saturation behavior.
-            exposure_factor_bg = 1.0 + np.log1p(exposure_ms / 10.0) * 0.2
-            exposure_factor_signal = 1.0 + np.log1p(exposure_ms / 10.0)
-            frame[~signal_mask] *= exposure_factor_bg
-            frame[signal_mask] *= exposure_factor_signal
-
-            # 6. Convert to 16-bit and add read noise/hot pixels
-            frame = np.clip(frame, 0, 65535).astype(np.uint16)
-
-            # Add a touch of read noise after conversion
-            frame += self._rng.normal(0, 5, frame.shape).astype(np.uint16)
-
-            # 7. Hot Pixels
+            # 6. Hot Pixels (applied before final conversion)
             if self.hot_pixel_prob > 0:
-                hot_pixels = self._rng.choice([True, False], size=frame.shape,
+                hot_pixels = self._rng.choice([True, False], size=noisy_frame.shape,
                                               p=[self.hot_pixel_prob, 1 - self.hot_pixel_prob])
-                frame[hot_pixels] = 65535
+                noisy_frame[hot_pixels] = 65535
+
+            # 7. Convert to final 16-bit format
+            final_frame = np.clip(noisy_frame, 0, 65535).astype(np.uint16)
 
             # --- Frame delivery ---
             if self._handler:
                 try:
-                    # Wrap in a mock Frame object for compatibility
-                    mock_frame = FakeFrame(frame, PixelFormat.Mono16)
-                    # Pass the frame to the handler (CameraService._Handler)
+                    mock_frame = FakeFrame(final_frame, PixelFormat.Mono16)
                     self._handler(self, None, mock_frame)
                 except Exception as e:
                     self._logger.error(f"FakeCamera: Error in handler: {e}", exc_info=True)
