@@ -49,6 +49,8 @@
     putTimer: null
   };
 
+  const roiImageTimers = new Map(); // Map<roiId, { profile:number, cuts:number }>
+
   // ----- REST helpers -----
   async function logToServer(level, message, data) {
     try {
@@ -329,7 +331,16 @@
     }
   }
 
+  function clearRoiImageTimers() {
+    for (const timers of roiImageTimers.values()) {
+      if (timers.profile) clearInterval(timers.profile);
+      if (timers.cuts) clearInterval(timers.cuts);
+    }
+    roiImageTimers.clear();
+  }
+
   function renderPerRoiPanels() {
+    clearRoiImageTimers();
     perRoiGrid.innerHTML = ''; // Clear the container
     for (const r of state.rois) {
       const card = document.createElement('div');
@@ -346,12 +357,10 @@
       const profileImg = document.createElement('img');
       profileImg.className = 'roi-profile';
       profileImg.alt = `Profile ${r.id}`;
-      profileImg.src = `/roi_profile_feed/${encodeURIComponent(r.id)}`;
 
       const cutsImg = document.createElement('img');
       cutsImg.className = 'roi-cuts';
       cutsImg.alt = `Cuts ${r.id}`;
-      cutsImg.src = `/roi_cuts_feed/${encodeURIComponent(r.id)}`;
 
       const integrationPlot = document.createElement('div');
       integrationPlot.className = 'roi-integration-plot';
@@ -368,6 +377,20 @@
       plots.appendChild(profileImg);
       plots.appendChild(cutsImg);
       plots.appendChild(integrationPlot);
+
+      const updateProfile = () => {
+        profileImg.src = `/roi_profile_image/${encodeURIComponent(r.id)}?ts=${Date.now()}`;
+      };
+      const updateCuts = () => {
+        cutsImg.src = `/roi_cuts_image/${encodeURIComponent(r.id)}?ts=${Date.now()}`;
+      };
+      updateProfile();
+      updateCuts();
+      const timers = {
+        profile: setInterval(updateProfile, 400),
+        cuts: setInterval(updateCuts, 400),
+      };
+      roiImageTimers.set(r.id, timers);
 
       const toolbar = document.createElement('div');
       toolbar.className = 'toolbar';

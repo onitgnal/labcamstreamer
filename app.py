@@ -9,11 +9,9 @@ import atexit
 from datetime import datetime
 from typing import Dict, Generator, Optional, Tuple, List
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 import cv2
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 from flask import Flask, Response, jsonify, render_template, request, send_file
 from beam_analysis import analyze_beam
@@ -80,14 +78,27 @@ class BeamAnalysisManager:
         self._frame_ts: float = 0.0
         self._compute_mode: str = "none"
         self._pixel_size: Optional[float] = None
-        self._pool = ProcessPoolExecutor()
+        self._min_interval: float = 0.3
+        self._max_workers: Optional[int] = None
+        self._pool: Optional[ProcessPoolExecutor] = None
+        self._last_signature: Tuple = ()
+        self._create_pool()
         atexit.register(self._shutdown_pool)
 
     def _shutdown_pool(self) -> None:
         try:
-            self._pool.shutdown(wait=False, cancel_futures=True)
+            if self._pool:
+                self._pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
+
+    def _create_pool(self) -> None:
+        if self._pool:
+            try:
+                self._pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+        self._pool = ProcessPoolExecutor(max_workers=self._max_workers)
 
     def update(self, gray: Optional[np.ndarray], rois: Optional[Tuple], opts: Dict[str, object]) -> None:
         frame_ts = time.time()
@@ -130,6 +141,29 @@ class BeamAnalysisManager:
         images: List[np.ndarray] = []
         roi_ids: List[str] = []
 
+        signature = tuple(
+            (
+                getattr(roi, "id", ""),
+                int(getattr(roi, "x", 0)),
+                int(getattr(roi, "y", 0)),
+                int(getattr(roi, "w", 0)),
+                int(getattr(roi, "h", 0)),
+            )
+            for roi in rois_list
+        )
+
+        with self._lock:
+            previous_data = {k: dict(v) for k, v in self._data.items()}
+            last_signature = getattr(self, "_last_signature", ())
+            last_ts = self._frame_ts
+            last_compute = self._compute_mode
+
+        now = frame_ts
+        should_analyze = compute != "none"
+        if should_analyze and signature == last_signature and compute == last_compute:
+            if now - last_ts < self._min_interval:
+                should_analyze = False
+
         if gray is not None and rois_list:
             for roi in rois_list:
                 rid = getattr(roi, "id", None)
@@ -151,9 +185,13 @@ class BeamAnalysisManager:
                     "frame_ts": frame_ts,
                     "pixel_size": pixel_size_val,
                 }
-                if compute != "none":
+                if should_analyze:
                     images.append(crop_copy.astype(np.float64))
                     roi_ids.append(rid)
+                else:
+                    prev_entry = previous_data.get(rid)
+                    if prev_entry:
+                        entries[rid]["result"] = prev_entry.get("result")
 
         analysis_kwargs = {
             "clip_negatives": clip_mode,
@@ -163,15 +201,36 @@ class BeamAnalysisManager:
             "compute_gaussian": compute_gauss,
         }
 
-        if compute != "none" and images:
+        if should_analyze and images:
             payloads = [(img, dict(analysis_kwargs)) for img in images]
-            try:
-                results = list(self._pool.map(_beam_worker, payloads))
-            except Exception as exc:
-                app.logger.warning(f"beam_analysis pool failure, falling back sequential: {exc}")
-                results = []
-                for payload in payloads:
-                    results.append(_beam_worker(payload))
+            results: List[Optional[Dict[str, object]]] = []
+            if not self._pool:
+                self._create_pool()
+            pool_attempted = False
+            if self._pool:
+                try:
+                    pool_attempted = True
+                    results = list(self._pool.map(_beam_worker, payloads))
+                except (BrokenProcessPool, RuntimeError) as exc:
+                    app.logger.warning(f"beam_analysis pool unavailable, recreating: {exc}")
+                    self._create_pool()
+                    if self._pool:
+                        try:
+                            results = list(self._pool.map(_beam_worker, payloads))
+                        except Exception as inner_exc:
+                            app.logger.warning(f"beam_analysis pool retry failed: {inner_exc}")
+                            results = []
+                    else:
+                        results = []
+                except Exception as exc:
+                    app.logger.warning(f"beam_analysis pool failure, switching to sequential: {exc}")
+                    results = []
+            if not results:
+                # Sequential fallback (covers no pool case or failures)
+                results = [
+                    _beam_worker(payload)
+                    for payload in payloads
+                ]
 
             for rid, res in zip(roi_ids, results):
                 if rid in entries:
@@ -182,6 +241,7 @@ class BeamAnalysisManager:
             self._frame_ts = frame_ts
             self._compute_mode = compute
             self._pixel_size = pixel_size_val
+            self._last_signature = signature
 
     def get(self, rid: str) -> Optional[Dict[str, object]]:
         with self._lock:
@@ -210,6 +270,306 @@ def _beam_worker(payload: Tuple[np.ndarray, Dict[str, object]]) -> Optional[Dict
         return analyze_beam(img, **kwargs)
     except Exception as exc:
         app.logger.warning(f"beam_analysis worker error: {exc}")
+        return None
+
+
+def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
+    r = roi_registry.get(rid)
+    entry = beam_manager.get(rid)
+    compute_mode = str(entry.get("compute") if entry else "none").lower()
+    result = entry.get("result") if entry else None
+    roi_gray = entry.get("roi_gray") if entry else None
+
+    if r is None:
+        return None
+
+    if roi_gray is None or getattr(roi_gray, "size", 0) == 0:
+        gray = cam_service.get_latest_gray()
+        if gray is not None and gray.size > 0:
+            h_img, w_img = gray.shape[:2]
+            x0 = max(0, min(int(r.x), w_img - 1))
+            y0 = max(0, min(int(r.y), h_img - 1))
+            x1 = max(x0 + 1, min(int(r.x + r.w), w_img))
+            y1 = max(y0 + 1, min(int(r.y + r.h), h_img))
+            roi_crop = gray[y0:y1, x0:x1]
+            roi_gray = roi_crop.copy() if roi_crop.size > 0 else None
+
+    if roi_gray is None or getattr(roi_gray, "size", 0) == 0:
+        return None
+
+    compute = compute_mode or "none"
+    if compute == "none" or result is None:
+        lo, hi = np.percentile(roi_gray, (1, 99))
+        if hi <= lo:
+            hi = lo + 1.0
+        norm = np.clip((roi_gray.astype(np.float32) - float(lo)) / float(hi - lo), 0.0, 1.0)
+        roi_u8 = (norm * 255.0).astype(np.uint8)
+        cm = cam_service.get_colormap()
+        return apply_colormap_to_gray(roi_u8, cm)
+
+    try:
+        proc = result.get("img_for_spec")
+        if proc is None or not isinstance(proc, np.ndarray) or proc.size == 0:
+            proc = roi_gray.astype(np.float32)
+        proc = np.asarray(proc, dtype=np.float32)
+        if proc.ndim == 3:
+            proc = np.mean(proc, axis=-1)
+        proc = np.nan_to_num(proc, nan=0.0, posinf=0.0, neginf=0.0)
+
+        cy = float(result.get("cy", 0.0))
+        cx = float(result.get("cx", 0.0))
+        rx_iso = float(result.get("rx_iso", 0.0))
+        ry_iso = float(result.get("ry_iso", 0.0))
+        theta = float(result.get("theta", 0.0))
+        fit_x = result.get("gauss_fit_x")
+        fit_y = result.get("gauss_fit_y")
+        gauss_rx = (fit_x or {}).get("radius")
+        gauss_ry = (fit_y or {}).get("radius")
+
+        lo = float(np.percentile(proc, 1))
+        hi = float(np.percentile(proc, 99))
+        if not np.isfinite(lo):
+            lo = float(np.min(proc)) if proc.size else 0.0
+        if not np.isfinite(hi):
+            hi = float(np.max(proc)) if proc.size else 1.0
+        if hi <= lo:
+            hi = lo + 1.0
+        norm = np.clip((proc - lo) / (hi - lo), 0.0, 1.0)
+        roi_u8 = (norm * 255.0).astype(np.uint8)
+        cm = cam_service.get_colormap()
+        img = apply_colormap_to_gray(roi_u8, cm)
+
+        major_r, minor_r, ang = rx_iso, ry_iso, theta
+        if ry_iso > rx_iso:
+            major_r, minor_r = ry_iso, rx_iso
+            ang = theta + (np.pi * 0.5)
+        c = float(np.cos(ang))
+        s = float(np.sin(ang))
+        if gauss_rx is not None and gauss_ry is not None:
+            g_major, g_minor = (float(gauss_rx), float(gauss_ry))
+            if ry_iso > rx_iso:
+                g_major, g_minor = float(gauss_ry), float(gauss_rx)
+        else:
+            g_major = g_minor = None
+
+        h_img, w_img = img.shape[:2]
+        t = np.linspace(0.0, 2.0 * np.pi, 361, dtype=np.float32)
+
+        if compute in ("both", "second"):
+            ex = cx + major_r * np.cos(t) * c - minor_r * np.sin(t) * s
+            ey = cy + major_r * np.cos(t) * s + minor_r * np.sin(t) * c
+            ellipse_pts = np.stack([ex, ey], axis=1)
+            ellipse_pts = np.nan_to_num(ellipse_pts, nan=0.0)
+            ellipse_pts[:, 0] = np.clip(ellipse_pts[:, 0], 0, w_img - 1)
+            ellipse_pts[:, 1] = np.clip(ellipse_pts[:, 1], 0, h_img - 1)
+            ellipse_pts = np.round(ellipse_pts).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(img, [ellipse_pts], True, (255, 255, 255), 2, cv2.LINE_AA)
+
+            major_pt1 = (int(np.clip(round(cx - major_r * c), 0, w_img - 1)), int(np.clip(round(cy - major_r * s), 0, h_img - 1)))
+            major_pt2 = (int(np.clip(round(cx + major_r * c), 0, w_img - 1)), int(np.clip(round(cy + major_r * s), 0, h_img - 1)))
+            minor_pt1 = (int(np.clip(round(cx + minor_r * s), 0, w_img - 1)), int(np.clip(round(cy - minor_r * c), 0, h_img - 1)))
+            minor_pt2 = (int(np.clip(round(cx - minor_r * s), 0, w_img - 1)), int(np.clip(round(cy + minor_r * c), 0, h_img - 1)))
+            cv2.line(img, major_pt1, major_pt2, (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.line(img, minor_pt1, minor_pt2, (255, 0, 255), 2, cv2.LINE_AA)
+
+        if compute in ("both", "gauss") and g_major is not None and g_minor is not None:
+            gx = cx + g_major * np.cos(t) * c - g_minor * np.sin(t) * s
+            gy = cy + g_major * np.cos(t) * s + g_minor * np.sin(t) * c
+            g_pts = np.stack([gx, gy], axis=1)
+            g_pts = np.nan_to_num(g_pts, nan=0.0)
+            g_pts[:, 0] = np.clip(g_pts[:, 0], 0, w_img - 1)
+            g_pts[:, 1] = np.clip(g_pts[:, 1], 0, h_img - 1)
+            g_pts = np.round(g_pts).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(img, [g_pts], True, (0, 255, 255), 2, cv2.LINE_AA)
+
+        target_h = 240.0
+        scale = target_h / max(1.0, float(h_img))
+        scaled_w = max(1, int(round(w_img * scale)))
+        scaled_h = int(round(target_h))
+        return cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
+    except Exception as exc:
+        app.logger.warning(f"compose profile error for ROI {rid}: {exc}", exc_info=True)
+        return None
+
+
+
+_CUTS_BG_COLOR = (29, 21, 17)
+_CUTS_AXIS_COLOR = (82, 86, 96)
+_CUTS_TEXT_COLOR = (230, 232, 236)
+_CUTS_SUBTEXT_COLOR = (190, 195, 205)
+_CUTS_LINE_COLOR_X = (226, 144, 74)
+_CUTS_LINE_COLOR_Y = (194, 227, 80)
+_CUTS_ISO_COLOR = (170, 255, 0)
+_CUTS_GAUSS_COLOR = (0, 170, 255)
+
+def _draw_cuts_panel(
+    panel: np.ndarray,
+    positions: np.ndarray,
+    values: np.ndarray,
+    *,
+    title: str,
+    axis_label: str,
+    line_color: Tuple[int, int, int],
+    iso_center: float,
+    iso_radius: float,
+    gauss_amplitude: float,
+    gauss_center: float,
+    gauss_radius: float,
+    pixel_size: Optional[float],
+) -> None:
+    h, w = panel.shape[:2]
+    top, bottom, left, right = 28, 32, 36, 18
+    plot_w = max(1, w - left - right)
+    plot_h = max(1, h - top - bottom)
+
+    origin = (left, h - bottom)
+    cv2.line(panel, origin, (w - right, h - bottom), _CUTS_AXIS_COLOR, 1, cv2.LINE_AA)
+    cv2.line(panel, origin, (left, top), _CUTS_AXIS_COLOR, 1, cv2.LINE_AA)
+
+    cv2.putText(panel, title, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.66, _CUTS_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(panel, axis_label, (left, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _CUTS_SUBTEXT_COLOR, 1, cv2.LINE_AA)
+
+    pos = np.asarray(positions, dtype=np.float32).reshape(-1)
+    vals = np.asarray(values, dtype=np.float32).reshape(-1)
+    if pos.size == 0 or vals.size == 0:
+        return
+
+    pos = np.nan_to_num(pos, nan=0.0, posinf=0.0, neginf=0.0)
+    vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
+
+    base = float(np.min(pos)) if pos.size else 0.0
+    span = float(np.max(pos) - base) if pos.size else 0.0
+    if not np.isfinite(base):
+        base = 0.0
+    if not np.isfinite(span) or span < 1e-6:
+        span = 1.0
+
+    pos_norm = np.clip((pos - base) / span, 0.0, 1.0)
+    x_coords = left + np.clip(np.round(pos_norm * (plot_w - 1)).astype(np.int32), 0, plot_w - 1)
+
+    max_val = float(np.max(vals)) if vals.size else 0.0
+    if not np.isfinite(max_val) or max_val <= 0.0:
+        alt = float(np.max(np.abs(vals))) if vals.size else 0.0
+        max_val = alt if alt > 0.0 else 1.0
+    val_norm = np.clip(vals / max_val, 0.0, 1.0)
+    y_coords = (h - bottom) - np.clip(np.round(val_norm * (plot_h - 1)).astype(np.int32), 0, plot_h - 1)
+
+    pts = np.column_stack((x_coords, y_coords)).astype(np.int32)
+    if pts.shape[0] >= 2:
+        cv2.polylines(panel, [pts.reshape(-1, 1, 2)], False, line_color, 2, cv2.LINE_AA)
+    elif pts.shape[0] == 1:
+        cv2.circle(panel, tuple(pts[0]), 2, line_color, -1, cv2.LINE_AA)
+
+    def _pos_to_x(value: float) -> int:
+        if not np.isfinite(value):
+            value = base
+        ratio = (value - base) / span
+        px = left + int(round(ratio * (plot_w - 1)))
+        return max(left, min(px, w - right - 1))
+
+    if iso_radius > 0.0:
+        lx = _pos_to_x(iso_center - iso_radius)
+        rx = _pos_to_x(iso_center + iso_radius)
+        cv2.line(panel, (lx, top), (lx, h - bottom), _CUTS_ISO_COLOR, 1, cv2.LINE_AA)
+        cv2.line(panel, (rx, top), (rx, h - bottom), _CUTS_ISO_COLOR, 1, cv2.LINE_AA)
+
+    if gauss_radius > 0.0:
+        lx = _pos_to_x(gauss_center - gauss_radius)
+        rx = _pos_to_x(gauss_center + gauss_radius)
+        cv2.line(panel, (lx, top), (lx, h - bottom), _CUTS_GAUSS_COLOR, 1, cv2.LINE_AA)
+        cv2.line(panel, (rx, top), (rx, h - bottom), _CUTS_GAUSS_COLOR, 1, cv2.LINE_AA)
+
+    if gauss_radius > 0.0 and gauss_amplitude > 0.0:
+        samples = np.linspace(base, base + span, 256, dtype=np.float32)
+        gauss_vals = gauss_amplitude * np.exp(-2.0 * ((samples - gauss_center) / max(gauss_radius, 1e-6)) ** 2)
+        gauss_vals = np.nan_to_num(gauss_vals, nan=0.0, posinf=0.0, neginf=0.0)
+        sample_norm = np.clip((samples - base) / span, 0.0, 1.0)
+        gauss_norm = np.clip(gauss_vals / max_val, 0.0, 1.0)
+        gx = left + np.clip(np.round(sample_norm * (plot_w - 1)).astype(np.int32), 0, plot_w - 1)
+        gy = (h - bottom) - np.clip(np.round(gauss_norm * (plot_h - 1)).astype(np.int32), 0, plot_h - 1)
+        g_pts = np.column_stack((gx, gy)).astype(np.int32)
+        if g_pts.shape[0] >= 2:
+            cv2.polylines(panel, [g_pts.reshape(-1, 1, 2)], False, _CUTS_GAUSS_COLOR, 1, cv2.LINE_AA)
+
+    annotations = []
+    if iso_radius > 0.0:
+        if pixel_size is not None:
+            annotations.append(f"ISO {iso_radius * pixel_size:.3f}")
+        else:
+            annotations.append(f"ISO {iso_radius:.2f}px")
+    if gauss_radius > 0.0:
+        if pixel_size is not None:
+            annotations.append(f"Gauss {gauss_radius * pixel_size:.3f}")
+        else:
+            annotations.append(f"Gauss {gauss_radius:.2f}px")
+    if annotations:
+        cv2.putText(panel, ' | '.join(annotations), (left, max(20, top - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _CUTS_SUBTEXT_COLOR, 1, cv2.LINE_AA)
+
+
+def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
+    entry = beam_manager.get(rid)
+    compute_mode = str(entry.get("compute") if entry else "none").lower()
+    result = entry.get("result") if entry else None
+    pixel_size_val = entry.get("pixel_size") if entry else None
+    try:
+        pixel_size_val = float(pixel_size_val)
+    except (TypeError, ValueError):
+        pixel_size_val = None
+
+    if compute_mode == "none" or result is None:
+        app.logger.debug(f"compose cuts skipping for ROI {rid}: compute={compute_mode}, has_result={bool(result)}")
+        return None
+
+    try:
+        x_positions, Ix = result["Ix_spectrum"]
+        y_positions, Iy = result["Iy_spectrum"]
+        fit_x = result.get("gauss_fit_x") or {}
+        fit_y = result.get("gauss_fit_y") or {}
+        cx_iso = float(result.get("cx", 0.0))
+        cy_iso = float(result.get("cy", 0.0))
+        rx_iso = float(result.get("rx_iso", 0.0))
+        ry_iso = float(result.get("ry_iso", 0.0))
+        gauss_cx = float(fit_x.get("centre", cx_iso))
+        gauss_cy = float(fit_y.get("centre", cy_iso))
+        gauss_rx = float(fit_x.get("radius", 0.0)) if fit_x else 0.0
+        gauss_ry = float(fit_y.get("radius", 0.0)) if fit_y else 0.0
+        amp_x = float(fit_x.get("amplitude", 0.0)) if fit_x else 0.0
+        amp_y = float(fit_y.get("amplitude", 0.0)) if fit_y else 0.0
+
+        canvas = np.full((240, 480, 3), _CUTS_BG_COLOR, dtype=np.uint8)
+        with _plot_lock:
+            _draw_cuts_panel(
+                canvas[:, :240],
+                x_positions,
+                Ix,
+                title="Ix cuts",
+                axis_label="x (px)",
+                line_color=_CUTS_LINE_COLOR_X,
+                iso_center=cx_iso,
+                iso_radius=rx_iso,
+                gauss_amplitude=amp_x,
+                gauss_center=gauss_cx,
+                gauss_radius=gauss_rx,
+                pixel_size=pixel_size_val,
+            )
+            _draw_cuts_panel(
+                canvas[:, 240:],
+                y_positions,
+                Iy,
+                title="Iy cuts",
+                axis_label="y (px)",
+                line_color=_CUTS_LINE_COLOR_Y,
+                iso_center=cy_iso,
+                iso_radius=ry_iso,
+                gauss_amplitude=amp_y,
+                gauss_center=gauss_cy,
+                gauss_radius=gauss_ry,
+                pixel_size=pixel_size_val,
+            )
+            cv2.line(canvas, (240, 24), (240, 240 - 24), _CUTS_AXIS_COLOR, 1, cv2.LINE_AA)
+        return canvas
+    except Exception as exc:
+        app.logger.warning(f"compose cuts error for ROI {rid}: {exc}", exc_info=True)
         return None
 
 # Background metrics loop
@@ -478,120 +838,9 @@ def roi_feed(rid: str):
 def _roi_profile_frames(rid: str) -> Generator[bytes, None, None]:
     boundary = b"--frame\r\n"
     while True:
-        r = roi_registry.get(rid)
-        entry = beam_manager.get(rid)
-        compute_mode = str(entry.get("compute") if entry else "none").lower()
-        result = entry.get("result") if entry else None
-        roi_gray = entry.get("roi_gray") if entry else None
-        if r is None:
+        img = _compose_roi_profile_image(rid)
+        if img is None:
             img = _placeholder("ROI unavailable", (256, 256))
-        else:
-            if roi_gray is None or getattr(roi_gray, "size", 0) == 0:
-                gray = cam_service.get_latest_gray()
-                if gray is not None and gray.size > 0:
-                    h_img, w_img = gray.shape[:2]
-                    x0 = max(0, min(int(r.x), w_img - 1))
-                    y0 = max(0, min(int(r.y), h_img - 1))
-                    x1 = max(x0 + 1, min(int(r.x + r.w), w_img))
-                    y1 = max(y0 + 1, min(int(r.y + r.h), h_img))
-                    roi_crop = gray[y0:y1, x0:x1]
-                    roi_gray = roi_crop.copy() if roi_crop.size > 0 else None
-            if roi_gray is None or getattr(roi_gray, "size", 0) == 0:
-                img = _placeholder("ROI out of bounds", (256, 256))
-            else:
-                compute = compute_mode or "none"
-                if compute == "none" or result is None:
-                    lo, hi = np.percentile(roi_gray, (1, 99))
-                    if hi <= lo:
-                        hi = lo + 1.0
-                    norm = np.clip((roi_gray.astype(np.float32) - float(lo)) / float(hi - lo), 0.0, 1.0)
-                    roi_u8 = (norm * 255.0).astype(np.uint8)
-                    cm = cam_service.get_colormap()
-                    img = apply_colormap_to_gray(roi_u8, cm)
-                else:
-                    try:
-                        proc = result.get("img_for_spec")
-                        if proc is None or not isinstance(proc, np.ndarray) or proc.size == 0:
-                            proc = roi_gray.astype(np.float32)
-                        proc = np.asarray(proc, dtype=np.float32)
-                        if proc.ndim == 3:
-                            proc = np.mean(proc, axis=-1)
-                        proc = np.nan_to_num(proc, nan=0.0, posinf=0.0, neginf=0.0)
-
-                        cy = float(result.get("cy", 0.0))
-                        cx = float(result.get("cx", 0.0))
-                        rx_iso = float(result.get("rx_iso", 0.0))
-                        ry_iso = float(result.get("ry_iso", 0.0))
-                        theta = float(result.get("theta", 0.0))
-                        fit_x = result.get("gauss_fit_x")
-                        fit_y = result.get("gauss_fit_y")
-                        gauss_rx = (fit_x or {}).get("radius")
-                        gauss_ry = (fit_y or {}).get("radius")
-
-                        lo = float(np.percentile(proc, 1))
-                        hi = float(np.percentile(proc, 99))
-                        if not np.isfinite(lo):
-                            lo = float(np.min(proc)) if proc.size else 0.0
-                        if not np.isfinite(hi):
-                            hi = float(np.max(proc)) if proc.size else 1.0
-                        if hi <= lo:
-                            hi = lo + 1.0
-                        norm = np.clip((proc - lo) / (hi - lo), 0.0, 1.0)
-                        roi_u8 = (norm * 255.0).astype(np.uint8)
-                        cm = cam_service.get_colormap()
-                        img = apply_colormap_to_gray(roi_u8, cm)
-
-                        major_r, minor_r, ang = rx_iso, ry_iso, theta
-                        if ry_iso > rx_iso:
-                            major_r, minor_r = ry_iso, rx_iso
-                            ang = theta + (np.pi * 0.5)
-                        c = float(np.cos(ang))
-                        s = float(np.sin(ang))
-                        if gauss_rx is not None and gauss_ry is not None:
-                            g_major, g_minor = (float(gauss_rx), float(gauss_ry))
-                            if ry_iso > rx_iso:
-                                g_major, g_minor = float(gauss_ry), float(gauss_rx)
-                        else:
-                            g_major = g_minor = None
-
-                        h_img, w_img = img.shape[:2]
-                        t = np.linspace(0.0, 2.0 * np.pi, 361, dtype=np.float32)
-
-                        if compute in ("both", "second"):
-                            ex = cx + major_r * np.cos(t) * c - minor_r * np.sin(t) * s
-                            ey = cy + major_r * np.cos(t) * s + minor_r * np.sin(t) * c
-                            ellipse_pts = np.stack([ex, ey], axis=1)
-                            ellipse_pts = np.nan_to_num(ellipse_pts, nan=0.0)
-                            ellipse_pts[:, 0] = np.clip(ellipse_pts[:, 0], 0, w_img - 1)
-                            ellipse_pts[:, 1] = np.clip(ellipse_pts[:, 1], 0, h_img - 1)
-                            ellipse_pts = np.round(ellipse_pts).astype(np.int32).reshape(-1, 1, 2)
-                            cv2.polylines(img, [ellipse_pts], True, (255, 255, 255), 2, cv2.LINE_AA)
-
-                            major_pt1 = (int(np.clip(round(cx - major_r * c), 0, w_img - 1)), int(np.clip(round(cy - major_r * s), 0, h_img - 1)))
-                            major_pt2 = (int(np.clip(round(cx + major_r * c), 0, w_img - 1)), int(np.clip(round(cy + major_r * s), 0, h_img - 1)))
-                            minor_pt1 = (int(np.clip(round(cx + minor_r * s), 0, w_img - 1)), int(np.clip(round(cy - minor_r * c), 0, h_img - 1)))
-                            minor_pt2 = (int(np.clip(round(cx - minor_r * s), 0, w_img - 1)), int(np.clip(round(cy + minor_r * c), 0, h_img - 1)))
-                            cv2.line(img, major_pt1, major_pt2, (255, 255, 0), 2, cv2.LINE_AA)
-                            cv2.line(img, minor_pt1, minor_pt2, (255, 0, 255), 2, cv2.LINE_AA)
-
-                        if compute in ("both", "gauss") and g_major is not None and g_minor is not None:
-                            gx = cx + g_major * np.cos(t) * c - g_minor * np.sin(t) * s
-                            gy = cy + g_major * np.cos(t) * s + g_minor * np.sin(t) * c
-                            g_pts = np.stack([gx, gy], axis=1)
-                            g_pts = np.nan_to_num(g_pts, nan=0.0)
-                            g_pts[:, 0] = np.clip(g_pts[:, 0], 0, w_img - 1)
-                            g_pts[:, 1] = np.clip(g_pts[:, 1], 0, h_img - 1)
-                            g_pts = np.round(g_pts).astype(np.int32).reshape(-1, 1, 2)
-                            cv2.polylines(img, [g_pts], True, (0, 255, 255), 2, cv2.LINE_AA)
-
-                        target_h = 240.0
-                        scale = target_h / max(1.0, float(h_img))
-                        scaled_w = max(1, int(round(w_img * scale)))
-                        scaled_h = int(round(target_h))
-                        img = cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
-                    except Exception as e:
-                        app.logger.warning(f"beam profile plot error for ROI {rid}: {e}", exc_info=True)
-                        img = _placeholder("Analysis plot error", (256, 256))
         jpg = _encode_jpeg(img)
         if jpg:
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
@@ -601,154 +850,23 @@ def _roi_profile_frames(rid: str) -> Generator[bytes, None, None]:
 def roi_profile_feed(rid: str):
     return mjpeg_response(_roi_profile_frames(rid))
 
+
+@app.route("/roi_profile_image/<rid>")
+def roi_profile_image(rid: str):
+    img = _compose_roi_profile_image(rid)
+    if img is None:
+        img = _placeholder("ROI unavailable", (256, 256))
+    png = _encode_png(img)
+    if png:
+        return Response(png, mimetype="image/png")
+    return Response(status=500)
+
 def _roi_cuts_frames(rid: str) -> Generator[bytes, None, None]:
     boundary = b"--frame\r\n"
     while True:
-        r = roi_registry.get(rid)
-        entry = beam_manager.get(rid)
-        compute_mode = str(entry.get("compute") if entry else "none").lower()
-        result = entry.get("result") if entry else None
-        pixel_size_val = entry.get("pixel_size") if entry else None
-        try:
-            pixel_size_val = float(pixel_size_val)
-        except (TypeError, ValueError):
-            pixel_size_val = None
-
-        if r is None:
-            img = _placeholder("ROI unavailable", (320, 200))
-        else:
-            if compute_mode == "none":
-                img = _placeholder("Analysis disabled", (320, 200))
-            elif result is None:
-                img = _placeholder("Analysis pending", (320, 200))
-            else:
-                try:
-                    x_positions, Ix = result["Ix_spectrum"]
-                    y_positions, Iy = result["Iy_spectrum"]
-                    fit_x = result.get("gauss_fit_x") or {}
-                    fit_y = result.get("gauss_fit_y") or {}
-                    cx_iso = float(result.get("cx", 0.0))
-                    cy_iso = float(result.get("cy", 0.0))
-                    rx_iso = float(result.get("rx_iso", 0.0))
-                    ry_iso = float(result.get("ry_iso", 0.0))
-                    gauss_cx = float(fit_x.get("centre", cx_iso))
-                    gauss_cy = float(fit_y.get("centre", cy_iso))
-                    gauss_rx = float(fit_x.get("radius", 0.0)) if fit_x else 0.0
-                    gauss_ry = float(fit_y.get("radius", 0.0)) if fit_y else 0.0
-
-                    with _plot_lock:
-                        fig, axes = plt.subplots(1, 2, figsize=(5.6, 2.2), dpi=100)
-                        axx, axy = axes
-
-                        axx.plot(x_positions, Ix, color="#4a90e2", label="Ix")
-                        if compute_mode in ("both", "gauss") and fit_x:
-                            A = fit_x["amplitude"]
-                            xc = gauss_cx
-                            rx = gauss_rx
-                            xx = np.linspace(x_positions.min(), x_positions.max(), 400)
-                            yy = A * np.exp(-2.0 * ((xx - xc) / max(rx, 1e-6)) ** 2)
-                            axx.plot(xx, yy, color="orange", linestyle="--", label="Gauss")
-                       
-                        if rx_iso > 0.0:
-                            axx.axvline(cx_iso - rx_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label="2nd moment radius")
-                            axx.axvline(cx_iso + rx_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label=None)
-                        if gauss_rx > 0.0:
-                            axx.axvline(gauss_cx - gauss_rx, color="#ffaa00", linestyle="-.", linewidth=1.2, label="Gauss radius")
-                            axx.axvline(gauss_cx + gauss_rx, color="#ffaa00", linestyle="-.", linewidth=1.2, label=None)
-                        ann_lines = []
-                        if rx_iso > 0.0:
-                            if pixel_size_val:
-                                msg = f"ISO: {rx_iso * pixel_size_val:.3f}"
-                            else:
-                                msg = f"ISO: {rx_iso:.2f} px"
-                            ann_lines.append(msg)
-                        if gauss_rx > 0.0:
-                            if pixel_size_val:
-                                msg = f"Gauss: {gauss_rx * pixel_size_val:.3f}"
-                            else:
-                                msg = f"Gauss: {gauss_rx:.2f} px"
-                            ann_lines.append(msg)
-                        if ann_lines:
-                            axx.text(0.02, 0.95, ' | '.join(ann_lines), transform=axx.transAxes, fontsize=8, va='top', ha='left', bbox=dict(facecolor='black', alpha=0.35, pad=4))
-                        handles, labels = axx.get_legend_handles_labels()
-                        if handles:
-                            unique = {}
-                            ordered = []
-                            for h, l in zip(handles, labels):
-                                if not l or l in unique:
-                                    continue
-                                unique[l] = h
-                                ordered.append((h, l))
-                            if ordered:
-                                axx.legend([h for h, _ in ordered], [l for _, l in ordered], loc="best", fontsize=8)
-                        axx.set_title("Ix cuts", fontsize=10)
-                        axx.set_xlabel("x (px)", fontsize=9)
-                        axx.set_ylabel("a.u.", fontsize=9)
-                        axx.tick_params(labelsize=8)
-
-                        axy.plot(y_positions, Iy, color="#50e3c2", label="Iy")
-                        if compute_mode in ("both", "gauss") and fit_y:
-                            A = fit_y["amplitude"]
-                            yc = gauss_cy
-                            ry = gauss_ry
-                            yy = np.linspace(y_positions.min(), y_positions.max(), 400)
-                            zz = A * np.exp(-2.0 * ((yy - yc) / max(ry, 1e-6)) ** 2)
-                            axy.plot(yy, zz, color="orange", linestyle="--", label="Gauss")
-                       
-                        if ry_iso > 0.0:
-                            axy.axvline(cy_iso - ry_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label="2nd moment radius")
-                            axy.axvline(cy_iso + ry_iso, color="#00ffaa", linestyle=":", linewidth=1.2, label=None)
-                        if gauss_ry > 0.0:
-                            axy.axvline(gauss_cy - gauss_ry, color="#ffaa00", linestyle="-.", linewidth=1.2, label="Gauss radius")
-                            axy.axvline(gauss_cy + gauss_ry, color="#ffaa00", linestyle="-.", linewidth=1.2, label=None)
-                        ann_lines_y = []
-                        if ry_iso > 0.0:
-                            if pixel_size_val:
-                                msg = f"ISO: {ry_iso * pixel_size_val:.3f}"
-                            else:
-                                msg = f"ISO: {ry_iso:.2f} px"
-                            ann_lines_y.append(msg)
-                        if gauss_ry > 0.0:
-                            if pixel_size_val:
-                                msg = f"Gauss: {gauss_ry * pixel_size_val:.3f}"
-                            else:
-                                msg = f"Gauss: {gauss_ry:.2f} px"
-                            ann_lines_y.append(msg)
-                        if ann_lines_y:
-                            axy.text(0.02, 0.95, ' | '.join(ann_lines_y), transform=axy.transAxes, fontsize=8, va='top', ha='left', bbox=dict(facecolor='black', alpha=0.35, pad=4))
-                        handles_y, labels_y = axy.get_legend_handles_labels()
-                        if handles_y:
-                            unique_y = {}
-                            ordered_y = []
-                            for h, l in zip(handles_y, labels_y):
-                                if not l or l in unique_y:
-                                    continue
-                                unique_y[l] = h
-                                ordered_y.append((h, l))
-                            if ordered_y:
-                                axy.legend([h for h, _ in ordered_y], [l for _, l in ordered_y], loc="best", fontsize=8)
-                        axy.set_title("Iy cuts", fontsize=10)
-                        axy.set_xlabel("y (px)", fontsize=9)
-                        axy.set_ylabel("a.u.", fontsize=9)
-                        axy.tick_params(labelsize=8)
-
-                    fig.tight_layout(pad=0.6)
-                    fig.canvas.draw()
-                    canvas = fig.canvas
-                    w, h = canvas.get_width_height()
-                    if hasattr(canvas, "buffer_rgba"):
-                        buf = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
-                        rgb = buf[..., :3].copy()
-                    else:
-                        rgb = np.frombuffer(canvas.tostring_rgb(), dtype=np.uint8).reshape(h, w, 3)
-                    plt.close(fig)
-                    base_img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                    target_h = 480
-                    target_w = target_h * 2
-                    img = cv2.resize(base_img, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-                except Exception as e:
-                    app.logger.warning(f"cuts plot error for ROI {rid}: {e}", exc_info=True)
-                    img = _placeholder("Cuts plot error", (320, 200))
+        img = _compose_roi_cuts_image(rid)
+        if img is None:
+            img = _placeholder("Cuts unavailable", (320, 200))
         jpg = _encode_jpeg(img)
         if jpg:
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
@@ -757,6 +875,17 @@ def _roi_cuts_frames(rid: str) -> Generator[bytes, None, None]:
 @app.route("/roi_cuts_feed/<rid>")
 def roi_cuts_feed(rid: str):
     return mjpeg_response(_roi_cuts_frames(rid))
+
+
+@app.route("/roi_cuts_image/<rid>")
+def roi_cuts_image(rid: str):
+    img = _compose_roi_cuts_image(rid)
+    if img is None:
+        img = _placeholder("Cuts unavailable", (320, 200))
+    png = _encode_png(img)
+    if png:
+        return Response(png, mimetype="image/png")
+    return Response(status=500)
 
 # Save bundle (JSON + PNG inside a ZIP)
 @app.route("/save_bundle")
@@ -810,3 +939,4 @@ if __name__ == "__main__":
 
     app.logger.info(f"Starting server on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+
