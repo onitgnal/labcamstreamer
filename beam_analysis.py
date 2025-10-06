@@ -256,6 +256,24 @@ def estimate_background_edge_ring(img: ArrayLike) -> float:
     return float(np.median(b))
 
 
+def _get_centroid(arr: np.ndarray) -> Tuple[float, float]:
+    """Compute the first-moment centroid of an image."""
+    if arr.size == 0:
+        return 0.0, 0.0
+
+    total = arr.sum()
+    if total <= 0.0:
+        # If the sum is zero or negative, centroid is ill-defined.
+        # Fall back to the geometric center.
+        h, w = arr.shape
+        return w / 2.0, h / 2.0
+
+    y_indices, x_indices = np.indices(arr.shape, dtype=np.float64)
+    cx = float((arr * x_indices).sum() / total)
+    cy = float((arr * y_indices).sum() / total)
+    return cx, cy
+
+
 def get_beam_size(profile: ArrayLike) -> Tuple[float, float, float, float, float]:
     """Return ISO second-moment radii and centroid for a beam profile.
 
@@ -743,19 +761,24 @@ def analyze_beam(
     # Optionally perform Gaussian fits along principal axes
     gauss_fit_x = None
     gauss_fit_y = None
+
+    # The display centroid should always be computed from the unrotated image,
+    # as this is what is returned for plotting.
+    # If rotation was used, iso_result['cx'] is in the rotated frame.
+    cx_display, cy_display = _get_centroid(img_for_spec)
+
     if compute_gaussian:
-        # initial guesses for Gaussian fit using ISO results
-        # amplitude guess: max value of spectrum
-        # centre guess: ISO centroid along each axis (now in local coords)
-        # radius guess: second moment radii (rx, ry)
-        centre_x_local = iso_result["cx"]
-        centre_y_local = iso_result["cy"]
-        rx = iso_result["rx"]
-        ry = iso_result["ry"]
+        # For Gaussian fits, we need the centroid in the coordinate system of
+        # the spectrum image (which may be rotated).
+        centre_x_fit = iso_result["cx"]
+        centre_y_fit = iso_result["cy"]
+        rx_fit = iso_result["rx"]
+        ry_fit = iso_result["ry"]
+
         # fit along x
-        params_x, cov_x = fit_gaussian(x_positions, Ix, (Ix.max(), centre_x_local, max(rx, 1e-3)))
+        params_x, cov_x = fit_gaussian(x_positions, Ix, (Ix.max(), centre_x_fit, max(rx_fit, 1e-3)))
         # fit along y
-        params_y, cov_y = fit_gaussian(y_positions, Iy, (Iy.max(), centre_y_local, max(ry, 1e-3)))
+        params_y, cov_y = fit_gaussian(y_positions, Iy, (Iy.max(), centre_y_fit, max(ry_fit, 1e-3)))
         gauss_fit_x = {
             "amplitude": params_x[0],
             "centre": params_x[1],
@@ -768,14 +791,15 @@ def analyze_beam(
             "radius": params_y[2],
             "covariance": cov_y,
         }
+
     return {
         "img_for_spec": img_for_spec,
         "img_for_spec_origin": crop_origin,
         "theta": iso_result["phi"],
         "rx_iso": iso_result["rx"],
         "ry_iso": iso_result["ry"],
-        "cx": iso_result["cx"],
-        "cy": iso_result["cy"],
+        "cx": cx_display,
+        "cy": cy_display,
         "Ix_spectrum": (x_positions, Ix),
         "Iy_spectrum": (y_positions, Iy),
         "gauss_fit_x": gauss_fit_x,
