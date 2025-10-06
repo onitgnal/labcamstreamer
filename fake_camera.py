@@ -53,9 +53,9 @@ class FakeFrame(Frame):
         if self._format == PixelFormat.Bgr8:
             return self._data
         elif self._format == PixelFormat.Mono16:
-            # Normalize 16-bit to 8-bit for display
-            normalized = cv2.normalize(self._data, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-            return cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
+            # Fixed 16-bit to 8-bit scaling to avoid frame-to-frame flicker
+            gray8 = (self._data >> 8).astype(np.uint8)
+            return cv2.cvtColor(gray8, cv2.COLOR_GRAY2BGR)
         elif self._format == PixelFormat.Mono8:
             return cv2.cvtColor(self._data, cv2.COLOR_GRAY2BGR)
         else:

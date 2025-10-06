@@ -263,6 +263,62 @@ class BeamAnalysisManager:
 
 beam_manager = BeamAnalysisManager()
 
+# ----- Stable per-ROI display scaling to avoid flicker -----
+_roi_scale_lock = threading.Lock()
+_roi_scale: Dict[str, Tuple[float, float]] = {}
+
+def _update_roi_scale(
+    rid: str,
+    arr: np.ndarray,
+    low_pct: float = 1.0,
+    high_pct: float = 99.0,
+    alpha_up: float = 0.3,
+    alpha_down: float = 0.05,
+    min_span: float = 5.0,
+) -> Tuple[float, float]:
+    """
+    Compute smoothed display bounds for a ROI using asymmetric EMA on percentiles.
+    - Rises faster than it falls to prevent oscillations.
+    - Enforces a minimum span to avoid division spikes.
+    """
+    if arr is None or getattr(arr, "size", 0) == 0:
+        with _roi_scale_lock:
+            return _roi_scale.get(rid, (0.0, 255.0))
+    a = np.asarray(arr, dtype=np.float32)
+    try:
+        lo_now = float(np.percentile(a, low_pct))
+        hi_now = float(np.percentile(a, high_pct))
+    except Exception:
+        lo_now = float(np.min(a)) if a.size else 0.0
+        hi_now = float(np.max(a)) if a.size else 1.0
+    if not np.isfinite(lo_now):
+        lo_now = 0.0
+    if not np.isfinite(hi_now):
+        hi_now = lo_now + 1.0
+    if hi_now <= lo_now:
+        hi_now = lo_now + 1.0
+
+    with _roi_scale_lock:
+        prev = _roi_scale.get(rid)
+        if prev is None:
+            lo, hi = lo_now, hi_now
+        else:
+            plo, phi = prev
+            lo_alpha = alpha_up if lo_now > plo else alpha_down
+            hi_alpha = alpha_up if hi_now > phi else alpha_down
+            lo = plo + lo_alpha * (lo_now - plo)
+            hi = phi + hi_alpha * (hi_now - phi)
+            if hi - lo < min_span:
+                hi = lo + min_span
+        _roi_scale[rid] = (lo, hi)
+        return lo, hi
+
+def _normalize_to_u8(arr: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    a = np.asarray(arr, dtype=np.float32)
+    span = max(1e-6, hi - lo)
+    norm = np.clip((a - lo) / span, 0.0, 1.0)
+    return (norm * 255.0).astype(np.uint8)
+
 
 def _beam_worker(payload: Tuple[np.ndarray, Dict[str, object]]) -> Optional[Dict[str, object]]:
     img, kwargs = payload
@@ -299,11 +355,8 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
 
     compute = compute_mode or "none"
     if compute == "none" or result is None:
-        lo, hi = np.percentile(roi_gray, (1, 99))
-        if hi <= lo:
-            hi = lo + 1.0
-        norm = np.clip((roi_gray.astype(np.float32) - float(lo)) / float(hi - lo), 0.0, 1.0)
-        roi_u8 = (norm * 255.0).astype(np.uint8)
+        lo, hi = _update_roi_scale(rid, roi_gray.astype(np.float32))
+        roi_u8 = _normalize_to_u8(roi_gray.astype(np.float32), lo, hi)
         cm = cam_service.get_colormap()
         return apply_colormap_to_gray(roi_u8, cm)
 
@@ -326,16 +379,8 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
         gauss_rx = (fit_x or {}).get("radius")
         gauss_ry = (fit_y or {}).get("radius")
 
-        lo = float(np.percentile(proc, 1))
-        hi = float(np.percentile(proc, 99))
-        if not np.isfinite(lo):
-            lo = float(np.min(proc)) if proc.size else 0.0
-        if not np.isfinite(hi):
-            hi = float(np.max(proc)) if proc.size else 1.0
-        if hi <= lo:
-            hi = lo + 1.0
-        norm = np.clip((proc - lo) / (hi - lo), 0.0, 1.0)
-        roi_u8 = (norm * 255.0).astype(np.uint8)
+        lo, hi = _update_roi_scale(rid, proc)
+        roi_u8 = _normalize_to_u8(proc, lo, hi)
         cm = cam_service.get_colormap()
         img = apply_colormap_to_gray(roi_u8, cm)
 
@@ -816,11 +861,8 @@ def _roi_stream_frames(rid: str) -> Generator[bytes, None, None]:
         if roi_gray.size == 0:
             img = _placeholder("ROI out of bounds", (256, 256))
         else:
-            lo, hi = np.percentile(roi_gray, (1, 99))
-            if hi <= lo:
-                hi = lo + 1.0
-            norm = np.clip((roi_gray.astype(np.float32) - float(lo)) / float(hi - lo), 0.0, 1.0)
-            roi_u8 = (norm * 255.0).astype(np.uint8)
+            lo, hi = _update_roi_scale(rid, roi_gray.astype(np.float32))
+            roi_u8 = _normalize_to_u8(roi_gray.astype(np.float32), lo, hi)
             cm = cam_service.get_colormap()
             img = apply_colormap_to_gray(roi_u8, cm)
         jpg = _encode_jpeg(img)
@@ -938,4 +980,3 @@ if __name__ == "__main__":
 
     app.logger.info(f"Starting server on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
-
