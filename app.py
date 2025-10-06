@@ -238,7 +238,8 @@ class BeamAnalysisManager:
 
         with self._lock:
             self._data = entries
-            self._frame_ts = frame_ts
+            if should_analyze and images:
+                self._frame_ts = frame_ts
             self._compute_mode = compute
             self._pixel_size = pixel_size_val
             self._last_signature = signature
