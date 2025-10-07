@@ -606,8 +606,8 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
 
         fit_x = result.get("gauss_fit_x") or {}
         fit_y = result.get("gauss_fit_y") or {}
-        cx_iso = float(result.get("cx", 0.0))
-        cy_iso = float(result.get("cy", 0.0))
+        cx_iso = float(result.get("cx_iso", result.get("cx", 0.0)))
+        cy_iso = float(result.get("cy_iso", result.get("cy", 0.0)))
         rx_iso = float(result.get("rx_iso", 0.0))
         ry_iso = float(result.get("ry_iso", 0.0))
         gauss_cx = float(fit_x.get("centre", cx_iso))

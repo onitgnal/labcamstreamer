@@ -798,6 +798,8 @@ def analyze_beam(
         "theta": iso_result["phi"],
         "rx_iso": iso_result["rx"],
         "ry_iso": iso_result["ry"],
+        "cx_iso": float(iso_result["cx"]),
+        "cy_iso": float(iso_result["cy"]),
         "cx": cx_display,
         "cy": cy_display,
         "Ix_spectrum": (x_positions, Ix),
