@@ -95,6 +95,40 @@
     }
   }
 
+
+
+  async function downloadRoiZip(rid, kind) {
+    const iso = new Date().toISOString().replace(/[:]/g, '-').replace(/\..+/, '');
+    const def = `${rid}_${kind}_${iso}`;
+    const promptLabel = kind === 'profile' ? 'Save profile as...' : 'Save cuts as...';
+    const input = window.prompt(promptLabel, def);
+    if (!input) return;
+    const baseName = input.trim();
+    if (!baseName) return;
+
+    const endpoint = kind === 'profile'
+      ? `/roi_profile_save/${encodeURIComponent(rid)}`
+      : `/roi_cuts_save/${encodeURIComponent(rid)}`;
+
+    try {
+      const res = await fetch(`${endpoint}?base=${encodeURIComponent(baseName)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${baseName}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      logToServer('error', `Failed to save ROI ${kind}`, { roiId: rid, error: err.toString() });
+      alert(`Failed to save ROI ${kind}. See logs for details.`);
+    }
+  }
+
+
   // ----- Beam options sync -----
   async function syncBeamOptions() {
     try {
@@ -405,6 +439,17 @@
 
       const toolbar = document.createElement('div');
       toolbar.className = 'toolbar';
+
+      const saveProfileBtn = document.createElement('button');
+      saveProfileBtn.textContent = 'Save Profile';
+      saveProfileBtn.onclick = () => downloadRoiZip(r.id, 'profile');
+      toolbar.appendChild(saveProfileBtn);
+
+      const saveCutsBtn = document.createElement('button');
+      saveCutsBtn.textContent = 'Save Cuts';
+      saveCutsBtn.onclick = () => downloadRoiZip(r.id, 'cuts');
+      toolbar.appendChild(saveCutsBtn);
+
       const resetBtn = document.createElement('button');
       resetBtn.textContent = 'Reset Max';
       resetBtn.onclick = () => resetMax(r.id);

@@ -1,5 +1,7 @@
 import io
+import csv
 import json
+import re
 import logging
 import threading
 import time
@@ -369,40 +371,52 @@ def _beam_worker(payload: Tuple[np.ndarray, Dict[str, object]]) -> Optional[Dict
         return None
 
 
-def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
+
+def _get_roi_gray_image(rid: str, *, entry: Optional[Dict[str, object]] = None) -> Optional[np.ndarray]:
+    """Return the latest grayscale ROI image for ``rid`` as float32."""
+    if entry is None:
+        entry = beam_manager.get(rid)
+    roi_gray = None
+    if entry:
+        roi_gray = entry.get("roi_gray")
+        if isinstance(roi_gray, np.ndarray) and getattr(roi_gray, "size", 0) > 0:
+            return np.asarray(roi_gray, dtype=np.float32)
     r = roi_registry.get(rid)
+    if r is None:
+        return None
+    gray = cam_service.get_latest_gray()
+    if gray is None or getattr(gray, "size", 0) == 0:
+        return None
+    h_img, w_img = gray.shape[:2]
+    x0 = max(0, min(int(r.x), w_img - 1))
+    y0 = max(0, min(int(r.y), h_img - 1))
+    x1 = max(x0 + 1, min(int(r.x + r.w), w_img))
+    y1 = max(y0 + 1, min(int(r.y + r.h), h_img))
+    roi_crop = gray[y0:y1, x0:x1]
+    if roi_crop.size == 0:
+        return None
+    return np.asarray(roi_crop, dtype=np.float32).copy()
+
+
+def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
     entry = beam_manager.get(rid)
     compute_mode = str(entry.get("compute") if entry else "none").lower()
     result = entry.get("result") if entry else None
-    roi_gray = entry.get("roi_gray") if entry else None
 
-    if r is None:
-        return None
-
-    if roi_gray is None or getattr(roi_gray, "size", 0) == 0:
-        gray = cam_service.get_latest_gray()
-        if gray is not None and gray.size > 0:
-            h_img, w_img = gray.shape[:2]
-            x0 = max(0, min(int(r.x), w_img - 1))
-            y0 = max(0, min(int(r.y), h_img - 1))
-            x1 = max(x0 + 1, min(int(r.x + r.w), w_img))
-            y1 = max(y0 + 1, min(int(r.y + r.h), h_img))
-            roi_crop = gray[y0:y1, x0:x1]
-            roi_gray = roi_crop.copy() if roi_crop.size > 0 else None
-
-    if roi_gray is None or getattr(roi_gray, "size", 0) == 0:
+    roi_gray = _get_roi_gray_image(rid, entry=entry)
+    if roi_gray is None:
         return None
 
     compute = compute_mode or "none"
     cm = cam_service.get_colormap()
-    peak = _update_roi_peak_intensity(rid, roi_gray)
+    base_peak = _update_roi_peak_intensity(rid, roi_gray)
 
     if compute == "none" or not result:
-        roi_u8 = _normalize_to_u8(roi_gray, peak)
+        roi_u8 = _normalize_to_u8(roi_gray, base_peak)
         return apply_colormap_to_gray(roi_u8, cm)
 
     try:
-        proc = result.get("img_for_spec")
+        proc = result.get("img_for_spec") if isinstance(result, dict) else None
         if proc is None or not isinstance(proc, np.ndarray) or proc.size == 0:
             proc = np.asarray(roi_gray, dtype=np.float32)
         else:
@@ -420,8 +434,8 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
         rx_iso = float(result.get("rx_iso", 0.0))
         ry_iso = float(result.get("ry_iso", 0.0))
         theta = float(result.get("theta", 0.0))
-        fit_x = result.get("gauss_fit_x")
-        fit_y = result.get("gauss_fit_y")
+        fit_x = result.get("gauss_fit_x") if isinstance(result, dict) else None
+        fit_y = result.get("gauss_fit_y") if isinstance(result, dict) else None
         gauss_rx = (fit_x or {}).get("radius")
         gauss_ry = (fit_y or {}).get("radius")
 
@@ -480,10 +494,6 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
     except Exception as exc:
         app.logger.warning(f"compose profile error for ROI {rid}: {exc}", exc_info=True)
         return None
-
-
-
-
 
 _PLOT_BG = (29, 21, 17)
 _PLOT_AXIS = (82, 86, 96)
@@ -693,6 +703,13 @@ def _metrics_loop():
 _metrics_thread = threading.Thread(target=_metrics_loop, daemon=True)
 _metrics_thread.start()
 
+
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+def _sanitize_filename(value: str, fallback: str) -> str:
+    safe = _SAFE_FILENAME_RE.sub('_', value).strip('._-')
+    return safe or fallback
+
 # ----- Helpers -----
 def mjpeg_response(gen: Generator[bytes, None, None]) -> Response:
     return Response(gen, mimetype="multipart/x-mixed-replace; boundary=frame")
@@ -704,6 +721,11 @@ def _encode_jpeg(img: np.ndarray) -> Optional[bytes]:
 def _encode_png(img: np.ndarray) -> Optional[bytes]:
     ok, buf = cv2.imencode(".png", img)
     return buf.tobytes() if ok else None
+
+def _encode_bmp(img: np.ndarray) -> Optional[bytes]:
+    ok, buf = cv2.imencode('.bmp', img)
+    return buf.tobytes() if ok else None
+
 
 def _placeholder(text: str, size=(640, 360)) -> np.ndarray:
     w, h = size
@@ -983,6 +1005,176 @@ def roi_cuts_image(rid: str):
         return Response(png, mimetype="image/png")
     return Response(status=500)
 
+
+@app.route("/roi_profile_save/<rid>")
+def roi_profile_save(rid: str):
+    base_param = (request.args.get("base", "") or "").strip()
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    fallback = f"{rid}_profile_{timestamp}"
+    base = _sanitize_filename(base_param, fallback)
+
+    entry = beam_manager.get(rid)
+    roi_gray = _get_roi_gray_image(rid, entry=entry)
+    if roi_gray is None or roi_gray.size == 0:
+        return jsonify({"error": "ROI data unavailable"}), 404
+
+    peak = _update_roi_peak_intensity(rid, roi_gray)
+    roi_u8 = _normalize_to_u8(roi_gray, peak)
+    bmp_bytes = _encode_bmp(roi_u8)
+    if not bmp_bytes:
+        return jsonify({"error": "Failed to encode BMP"}), 500
+
+    overlay = _compose_roi_profile_image(rid)
+    if overlay is None:
+        cm = cam_service.get_colormap()
+        overlay = apply_colormap_to_gray(roi_u8, cm)
+    png_bytes = _encode_png(overlay)
+    if not png_bytes:
+        return jsonify({"error": "Failed to encode PNG"}), 500
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{base}_gray.bmp", bmp_bytes)
+        zf.writestr(f"{base}_overlay.png", png_bytes)
+    mem.seek(0)
+    return send_file(mem, mimetype="application/zip", as_attachment=True, download_name=f"{base}.zip")
+
+
+def _format_physical(value: float, pixel_size: Optional[float]) -> str:
+    if pixel_size is None:
+        return ""
+    return f" ({value * pixel_size:.6g} units)"
+
+
+def _spectrum_stats(positions: np.ndarray, values: np.ndarray) -> Tuple[float, float, float, float]:
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1)
+    vals = np.asarray(values, dtype=np.float64).reshape(-1)
+    total = float(vals.sum())
+    if total <= 0.0 or pos.size == 0:
+        mean = float(pos.mean()) if pos.size else 0.0
+        variance = 0.0
+    else:
+        mean = float((pos * vals).sum() / total)
+        variance = float(((pos - mean) ** 2 * vals).sum() / max(total, 1e-12))
+    stddev = float(np.sqrt(max(variance, 0.0)))
+    return total, mean, variance, stddev
+
+
+@app.route("/roi_cuts_save/<rid>")
+def roi_cuts_save(rid: str):
+    base_param = (request.args.get("base", "") or "").strip()
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    fallback = f"{rid}_cuts_{timestamp}"
+    base = _sanitize_filename(base_param, fallback)
+
+    entry = beam_manager.get(rid)
+    result = entry.get("result") if entry else None
+    if not isinstance(result, dict):
+        return jsonify({"error": "No analysis result for ROI"}), 404
+
+    spectrum_x = result.get("Ix_spectrum")
+    spectrum_y = result.get("Iy_spectrum")
+    if not spectrum_x or not spectrum_y:
+        return jsonify({"error": "Spectra unavailable"}), 404
+
+    x_positions, Ix_vals = spectrum_x
+    y_positions, Iy_vals = spectrum_y
+    x_positions = np.asarray(x_positions, dtype=np.float64)
+    y_positions = np.asarray(y_positions, dtype=np.float64)
+    Ix_vals = np.asarray(Ix_vals, dtype=np.float64)
+    Iy_vals = np.asarray(Iy_vals, dtype=np.float64)
+    if x_positions.size == 0 or y_positions.size == 0:
+        return jsonify({"error": "Empty spectra"}), 404
+
+    cuts_img = _compose_roi_cuts_image(rid)
+    if cuts_img is None:
+        return jsonify({"error": "Cuts image unavailable"}), 404
+    png_bytes = _encode_png(cuts_img)
+    if not png_bytes:
+        return jsonify({"error": "Failed to encode cuts image"}), 500
+
+    total_x, mean_x, var_x, std_x = _spectrum_stats(x_positions, Ix_vals)
+    total_y, mean_y, var_y, std_y = _spectrum_stats(y_positions, Iy_vals)
+
+    pixel_size_val = entry.get("pixel_size") if entry else None
+    try:
+        pixel_size = float(pixel_size_val) if pixel_size_val is not None else None
+    except (TypeError, ValueError):
+        pixel_size = None
+
+    theta = float(result.get("theta", 0.0))
+    theta_deg = float(np.degrees(theta))
+    rx_iso = float(result.get("rx_iso", 0.0))
+    ry_iso = float(result.get("ry_iso", 0.0))
+    cx_iso = float(result.get("cx_iso", result.get("cx", 0.0)))
+    cy_iso = float(result.get("cy_iso", result.get("cy", 0.0)))
+    cx = float(result.get("cx", 0.0))
+    cy = float(result.get("cy", 0.0))
+
+    fit_x = result.get("gauss_fit_x") or {}
+    fit_y = result.get("gauss_fit_y") or {}
+
+    gauss_amp_x = float(fit_x.get("amplitude", 0.0)) if fit_x else 0.0
+    gauss_amp_y = float(fit_y.get("amplitude", 0.0)) if fit_y else 0.0
+    gauss_center_x = float(fit_x.get("centre", mean_x)) if fit_x else mean_x
+    gauss_center_y = float(fit_y.get("centre", mean_y)) if fit_y else mean_y
+    gauss_rad_x = float(fit_x.get("radius", 0.0)) if fit_x else 0.0
+    gauss_rad_y = float(fit_y.get("radius", 0.0)) if fit_y else 0.0
+
+    csv_buf = io.StringIO()
+    writer = csv.writer(csv_buf)
+    writer.writerow(["axis", "position_px", "value"])
+    for pos, val in zip(x_positions, Ix_vals):
+        writer.writerow(["x", f"{pos:.6g}", f"{val:.6g}"])
+    for pos, val in zip(y_positions, Iy_vals):
+        writer.writerow(["y", f"{pos:.6g}", f"{val:.6g}"])
+    spectra_bytes = csv_buf.getvalue().encode("utf-8")
+
+    analysis_lines = [
+        f"ROI: {rid}",
+        f"Generated: {datetime.utcnow().isoformat(timespec='seconds')}Z",
+        "",
+        "Second moment summary:",
+        f"  Ix total: {total_x:.6g}",
+        f"  Ix mean: {mean_x:.6g} px{_format_physical(mean_x, pixel_size)}",
+        f"  Ix variance: {var_x:.6g} px^2",
+        f"  Ix stddev: {std_x:.6g} px{_format_physical(std_x, pixel_size)}",
+        f"  Iy total: {total_y:.6g}",
+        f"  Iy mean: {mean_y:.6g} px{_format_physical(mean_y, pixel_size)}",
+        f"  Iy variance: {var_y:.6g} px^2",
+        f"  Iy stddev: {std_y:.6g} px{_format_physical(std_y, pixel_size)}",
+        "",
+        "Iso ellipse (second moment):",
+        f"  Centre ISO: ({cx_iso:.6g}, {cy_iso:.6g}) px",
+        f"  Radii ISO: rx={rx_iso:.6g} px{_format_physical(rx_iso, pixel_size)}, ry={ry_iso:.6g} px{_format_physical(ry_iso, pixel_size)}",
+        f"  Theta: {theta_deg:.3f} deg",
+        "",
+        "Centroid (raw):",
+        f"  ({cx:.6g}, {cy:.6g}) px",
+        "",
+        "Gaussian fits:",
+        f"  Ix amplitude: {gauss_amp_x:.6g}",
+        f"  Ix centre: {gauss_center_x:.6g} px{_format_physical(gauss_center_x, pixel_size)}",
+        f"  Ix radius: {gauss_rad_x:.6g} px{_format_physical(gauss_rad_x, pixel_size)}",
+        f"  Iy amplitude: {gauss_amp_y:.6g}",
+        f"  Iy centre: {gauss_center_y:.6g} px{_format_physical(gauss_center_y, pixel_size)}",
+        f"  Iy radius: {gauss_rad_y:.6g} px{_format_physical(gauss_rad_y, pixel_size)}",
+    ]
+    iterations = result.get("iterations")
+    if iterations is not None:
+        analysis_lines.append("")
+        analysis_lines.append(f"Iterations: {int(iterations)}")
+
+    analysis_text = "\n".join(analysis_lines) + "\n"
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{base}_cuts.png", png_bytes)
+        zf.writestr(f"{base}_spectra.csv", spectra_bytes)
+        zf.writestr(f"{base}_analysis.txt", analysis_text.encode('utf-8'))
+    mem.seek(0)
+    return send_file(mem, mimetype="application/zip", as_attachment=True, download_name=f"{base}.zip")
+
 # Save bundle (JSON + PNG inside a ZIP)
 @app.route("/save_bundle")
 def save_bundle():
@@ -1035,3 +1227,4 @@ if __name__ == "__main__":
 
     app.logger.info(f"Starting server on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+
