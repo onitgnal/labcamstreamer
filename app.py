@@ -26,6 +26,11 @@ app = Flask(__name__, template_folder="templates", static_folder="static", stati
 # ----- Logging Setup -----
 def setup_logging(dev_mode=False):
     log_level = logging.DEBUG if dev_mode else logging.INFO
+    app.logger.setLevel(log_level)
+
+    if not dev_mode:
+        return
+
     log_file = "app_debug.log"
 
     # Clear log file on startup
@@ -41,10 +46,8 @@ def setup_logging(dev_mode=False):
     # The Flask app's logger is configured here.
     # Any component holding a reference to app.logger will see the updates.
     app.logger.addHandler(handler)
-    app.logger.setLevel(log_level)
     app.logger.info("Application starting up...")
-    if dev_mode:
-        app.logger.info("Development mode enabled.")
+    app.logger.info("Development mode enabled.")
 
 # ----- Global services -----
 # Instantiate services globally. The logger will be configured later in the main block.
@@ -990,11 +993,11 @@ def save_bundle():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Flask-based camera streamer.")
-    parser.add_argument("--dev", action="store_true", help="Enable development mode (logging to file, port 5001).")
+    parser.add_argument("--dev", action="store_true", help="Enable development mode (logging to file).")
     parser.add_argument("--camera_id", type=str, help="Default camera ID to use.")
     args = parser.parse_args()
 
-    port = 5001 if args.dev else 5000
+    port = 5000
 
     # Setup logging first. cam_service was already instantiated with app.logger,
     # so it will pick up this configuration.
