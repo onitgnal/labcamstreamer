@@ -355,7 +355,7 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
         return None
 
     compute = compute_mode or "none"
-    if compute == "none" or result is None:
+    if compute == "none" or not result:
         lo, hi = _update_roi_scale(rid, roi_gray.astype(np.float32))
         roi_u8 = _normalize_to_u8(roi_gray.astype(np.float32), lo, hi)
         cm = cam_service.get_colormap()
@@ -380,7 +380,32 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
         gauss_rx = (fit_x or {}).get("radius")
         gauss_ry = (fit_y or {}).get("radius")
 
-        lo, hi = _update_roi_scale(rid, proc)
+        # Get metrics for normalization
+        snap = metrics.get_snapshot()
+        roi_metrics = snap.get("rois", [])
+        y_max_integral_map = snap.get("y_max_integral", {})
+        y_max_pixel_map = snap.get("y_max_pixel", {})
+        current_metric = next((m for m in roi_metrics if m.get("id") == rid), None)
+
+        lo, hi = 0.0, 255.0  # Default fallback
+        if current_metric:
+            value_per_ms = current_metric.get("value_per_ms", 0.0)
+            y_max_integral = y_max_integral_map.get(rid, 0.0)
+            y_max_pixel = y_max_pixel_map.get(rid, 0.0)
+
+            power_bar_fraction = 0.0
+            if y_max_integral > 1e-9:
+                power_bar_fraction = np.clip(value_per_ms / y_max_integral, 0.0, 1.0)
+
+            vmax_ms = power_bar_fraction * y_max_pixel
+            exp_us = snap.get("exposure_us", 1000)
+            exp_ms = max(1e-3, exp_us / 1000.0)
+
+            lo = 0.0
+            hi = max(1.0, vmax_ms * exp_ms)
+        else:
+            lo, hi = _update_roi_scale(rid, proc)
+
         roi_u8 = _normalize_to_u8(proc, lo, hi)
         cm = cam_service.get_colormap()
         img = apply_colormap_to_gray(roi_u8, cm)
