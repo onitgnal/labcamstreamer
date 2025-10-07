@@ -619,14 +619,14 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
         amp_x = float(fit_x.get("amplitude", 0.0)) if fit_x else 0.0
         amp_y = float(fit_y.get("amplitude", 0.0)) if fit_y else 0.0
 
-        unit = "um" if pixel_size_val is not None else "px"
+        unit_suffix = '' if pixel_size_val is not None else ' px'
         rx_iso_disp = rx_iso * (pixel_size_val or 1.0)
         ry_iso_disp = ry_iso * (pixel_size_val or 1.0)
         gauss_rx_disp = gauss_rx * (pixel_size_val or 1.0)
         gauss_ry_disp = gauss_ry * (pixel_size_val or 1.0)
 
-        title_x = f"Ix | ISO:{rx_iso_disp:.2f} | G:{gauss_rx_disp:.2f} {unit}"
-        title_y = f"Iy | ISO:{ry_iso_disp:.2f} | G:{gauss_ry_disp:.2f} {unit}"
+        title_x = f"Ix | ISO:{rx_iso_disp:.2f} | G:{gauss_rx_disp:.2f}{unit_suffix}"
+        title_y = f"Iy | ISO:{ry_iso_disp:.2f} | G:{gauss_ry_disp:.2f}{unit_suffix}"
 
         canvas = np.full((240, 480, 3), _PLOT_BG, dtype=np.uint8)
         with _plot_lock:
