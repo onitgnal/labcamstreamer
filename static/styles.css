@@ -100,6 +100,23 @@ select{
   border:1px solid var(--panel-border);
 }
 
+input[type="number"],
+input[type="text"]{
+  width:100%;
+  padding:6px 8px;
+  border-radius:8px;
+  background:#10131a;
+  color:var(--text);
+  border:1px solid var(--panel-border);
+}
+input[type="number"]:disabled,
+input[type="text"]:disabled{
+  background:#1a1d24;
+  color:var(--muted);
+  border-color:#20232c;
+  cursor:not-allowed;
+}
+
 /* ROI list */
 .roi-list{
   display:flex;

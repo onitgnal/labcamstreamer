@@ -116,6 +116,7 @@
       if (baAngleClip) baAngleClip.value = opts.angle_clip_mode || 'otsu';
       if (baBackground) baBackground.checked = !!opts.background_subtraction;
       if (baRotation) baRotation.value = opts.rotation || 'auto';
+      updateFixedAngleAvailability();
       if (baFixedAngle) baFixedAngle.value = opts.fixed_angle != null ? String(opts.fixed_angle) : '';
     } catch (_) {}
   }
@@ -125,6 +126,15 @@
       postJSON('/beam_options', patch);
     } catch (_) {}
   }
+
+  function updateFixedAngleAvailability() {
+    if (!baFixedAngle) return;
+    const mode = baRotation ? baRotation.value : 'auto';
+    const enable = mode === 'fixed';
+    baFixedAngle.disabled = !enable;
+  }
+
+  updateFixedAngleAvailability();
 
   if (baPixelSize) baPixelSize.addEventListener('change', () => {
     const v = baPixelSize.value.trim();
@@ -143,6 +153,7 @@
     postBeamOptions({ background_subtraction: !!baBackground.checked });
   });
   if (baRotation) baRotation.addEventListener('change', () => {
+    updateFixedAngleAvailability();
     postBeamOptions({ rotation: baRotation.value });
   });
   if (baFixedAngle) baFixedAngle.addEventListener('change', () => {
