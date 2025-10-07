@@ -96,12 +96,12 @@ class FakeCamera:
         self.sigma_range = (25.0, 60.0)
         self.background_level = 1000
         self.background_gradient_strength = 500.0
-        self.hot_pixel_prob = 1e-6
         self.drift_position_std_dev = 0.5
-        self.drift_amplitude_std_dev = 20.0
-        # Noise parameters for a more realistic model
-        self.shot_noise_factor = 0.1  # Proportional to signal
-        self.read_noise_level = 25.0 # Constant
+        self.max_amplitude_variation = 0.05  # +/-5 % envelope
+
+        # Noise parameters
+        self.background_noise_fraction = 0.5  # relative to short-exposure peak
+        self.read_noise_fraction = 0.2
 
         # --- Internal State ---
         self._rng = np.random.default_rng(self.random_seed)
@@ -110,6 +110,13 @@ class FakeCamera:
         self._features = {
             "ExposureTime": FakeFeature("ExposureTime", 10000.0, 1000.0, 50000.0),
         }
+
+        min_exp, _ = self._features["ExposureTime"].get_range()
+        self._min_exposure_us = float(min_exp)
+        short_exposure_factor = self._min_exposure_us / 20000.0
+        estimated_peak = self.amplitude_range[1] * short_exposure_factor
+        self.background_noise_std = max(1.0, estimated_peak * self.background_noise_fraction)
+        self.read_noise_level = max(1.0, estimated_peak * self.read_noise_fraction)
 
     def get_id(self) -> str:
         return self._id
@@ -151,21 +158,24 @@ class FakeCamera:
         self._logger.info("FakeCamera: Stream stopped.")
 
     def _initialize_beams(self):
-        """Initializes exactly three beams in predictable locations."""
+        """Initializes beams with random positions and shape parameters."""
         self._beams = []
-        positions = [
-            (self.width * 0.25, self.height * 0.5),
-            (self.width * 0.5, self.height * 0.3),
-            (self.width * 0.75, self.height * 0.7),
-        ]
-        for i, pos in enumerate(positions):
-            angle = self._rng.uniform(0, np.pi)
-            sx = self._rng.uniform(self.sigma_range[0], self.sigma_range[1]) * (1.0 + i * 0.1)
-            sy = sx * self._rng.uniform(0.6, 0.9)
+        num_beams = 3
+        margin_x = self.width * 0.1
+        margin_y = self.height * 0.1
+        for _ in range(num_beams):
+            cx = self._rng.uniform(margin_x, self.width - margin_x)
+            cy = self._rng.uniform(margin_y, self.height - margin_y)
+            angle = self._rng.uniform(0.0, np.pi)
+            sigma_major = self._rng.uniform(self.sigma_range[0], self.sigma_range[1])
+            aspect_ratio = self._rng.uniform(0.3, 1.0)
+            sigma_minor = sigma_major * aspect_ratio
+            amp = self._rng.uniform(self.amplitude_range[0], self.amplitude_range[1])
             self._beams.append({
-                'center': pos,
-                'amplitude': self._rng.uniform(self.amplitude_range[0], self.amplitude_range[1]),
-                'cov_matrix': self._create_covariance_matrix(sx, sy, angle)
+                'center': (cx, cy),
+                'amplitude': amp,
+                'base_amplitude': amp,
+                'cov_matrix': self._create_covariance_matrix(sigma_major, sigma_minor, angle)
             })
 
     def _initialize_static_gradient(self):
@@ -185,8 +195,14 @@ class FakeCamera:
             dx = self._rng.normal(0, self.drift_position_std_dev)
             dy = self._rng.normal(0, self.drift_position_std_dev)
             beam['center'] = (beam['center'][0] + dx, beam['center'][1] + dy)
-            da = self._rng.normal(0, self.drift_amplitude_std_dev)
-            beam['amplitude'] = max(0, beam['amplitude'] + da)
+
+            base_amp = beam.get('base_amplitude', beam['amplitude'])
+            variation = self._rng.uniform(-self.max_amplitude_variation, self.max_amplitude_variation)
+            target_amp = base_amp * (1.0 + variation)
+            updated = 0.9 * beam['amplitude'] + 0.1 * target_amp
+            lower = base_amp * (1.0 - self.max_amplitude_variation)
+            upper = base_amp * (1.0 + self.max_amplitude_variation)
+            beam['amplitude'] = float(np.clip(updated, lower, upper))
 
     def _generate_gaussian_patch(self, beam: dict) -> Tuple[np.ndarray, Tuple[int, int]]:
         """Generates a Gaussian beam on a smaller patch for performance."""
@@ -240,19 +256,12 @@ class FakeCamera:
             exposure_factor = exposure_us / 20000.0
             exposed_frame = ideal_frame * exposure_factor
 
-            # 5. Noise Simulation
-            shot_noise_variance = np.maximum(0, exposed_frame) * self.shot_noise_factor
-            shot_noise = self._rng.normal(0, np.sqrt(shot_noise_variance)).astype(np.float32)
-            read_noise = self._rng.normal(0, self.read_noise_level, ideal_frame.shape).astype(np.float32)
-            noisy_frame = exposed_frame + shot_noise + read_noise
+            # 5. Noise Simulation (exposure-independent)
+            background_noise = self._rng.normal(0.0, self.background_noise_std, ideal_frame.shape).astype(np.float32)
+            read_noise = self._rng.normal(0.0, self.read_noise_level, ideal_frame.shape).astype(np.float32)
+            noisy_frame = exposed_frame + background_noise + read_noise
 
-            # 6. Hot Pixels (applied before final conversion)
-            if self.hot_pixel_prob > 0:
-                hot_pixels = self._rng.choice([True, False], size=noisy_frame.shape,
-                                              p=[self.hot_pixel_prob, 1 - self.hot_pixel_prob])
-                noisy_frame[hot_pixels] = 65535
-
-            # 7. Convert to final 16-bit format
+            # 6. Convert to final 16-bit format
             final_frame = np.clip(noisy_frame, 0, 65535).astype(np.uint16)
 
             # --- Frame delivery ---

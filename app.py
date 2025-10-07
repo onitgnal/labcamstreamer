@@ -267,60 +267,95 @@ class BeamAnalysisManager:
 
 beam_manager = BeamAnalysisManager()
 
-# ----- Stable per-ROI display scaling to avoid flicker -----
-_roi_scale_lock = threading.Lock()
-_roi_scale: Dict[str, Tuple[float, float]] = {}
+# ----- Per-ROI intensity tracking -----
+_roi_intensity_lock = threading.Lock()
+_roi_peak_intensity: Dict[str, float] = {}
+_roi_cuts_peak: Dict[str, Tuple[float, float]] = {}
 
-def _update_roi_scale(
-    rid: str,
-    arr: np.ndarray,
-    low_pct: float = 1.0,
-    high_pct: float = 99.0,
-    alpha_up: float = 0.3,
-    alpha_down: float = 0.05,
-    min_span: float = 5.0,
-) -> Tuple[float, float]:
-    """
-    Compute smoothed display bounds for a ROI using asymmetric EMA on percentiles.
-    - Rises faster than it falls to prevent oscillations.
-    - Enforces a minimum span to avoid division spikes.
-    """
+
+def _update_roi_peak_intensity(rid: str, arr: Optional[np.ndarray]) -> float:
     if arr is None or getattr(arr, "size", 0) == 0:
-        with _roi_scale_lock:
-            return _roi_scale.get(rid, (0.0, 255.0))
+        with _roi_intensity_lock:
+            stored = _roi_peak_intensity.get(rid)
+            if stored is None:
+                app.logger.debug(f"ROI {rid}: peak requested with no history; returning default 1.0")
+                return 1.0
+            return stored
     a = np.asarray(arr, dtype=np.float32)
-    try:
-        lo_now = float(np.percentile(a, low_pct))
-        hi_now = float(np.percentile(a, high_pct))
-    except Exception:
-        lo_now = float(np.min(a)) if a.size else 0.0
-        hi_now = float(np.max(a)) if a.size else 1.0
-    if not np.isfinite(lo_now):
-        lo_now = 0.0
-    if not np.isfinite(hi_now):
-        hi_now = lo_now + 1.0
-    if hi_now <= lo_now:
-        hi_now = lo_now + 1.0
-
-    with _roi_scale_lock:
-        prev = _roi_scale.get(rid)
+    if a.size == 0:
+        with _roi_intensity_lock:
+            stored = _roi_peak_intensity.get(rid)
+            if stored is None:
+                app.logger.debug(f"ROI {rid}: zero-sized array provided; returning default 1.0")
+                return 1.0
+            return stored
+    a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+    peak_now = float(np.max(a))
+    if not np.isfinite(peak_now):
+        peak_now = 0.0
+    peak_now = max(0.0, peak_now)
+    with _roi_intensity_lock:
+        prev = _roi_peak_intensity.get(rid)
+        base = prev if prev is not None else 0.0
+        peak = max(base, peak_now, 1.0)
+        _roi_peak_intensity[rid] = peak
         if prev is None:
-            lo, hi = lo_now, hi_now
-        else:
-            plo, phi = prev
-            lo_alpha = alpha_up if lo_now > plo else alpha_down
-            hi_alpha = alpha_up if hi_now > phi else alpha_down
-            lo = plo + lo_alpha * (lo_now - plo)
-            hi = phi + hi_alpha * (hi_now - phi)
-            if hi - lo < min_span:
-                hi = lo + min_span
-        _roi_scale[rid] = (lo, hi)
-        return lo, hi
+            app.logger.debug(f"ROI {rid}: initializing peak intensity to {peak:.3f}")
+        elif peak > prev:
+            app.logger.debug(f"ROI {rid}: peak intensity updated from {prev:.3f} to {peak:.3f}")
+        return peak
 
-def _normalize_to_u8(arr: np.ndarray, lo: float, hi: float) -> np.ndarray:
+
+def _get_roi_peak_intensity(rid: str) -> float:
+    with _roi_intensity_lock:
+        return _roi_peak_intensity.get(rid, 1.0)
+
+
+def _update_roi_cuts_peak(rid: str, Ix: np.ndarray, Iy: np.ndarray) -> Tuple[float, float]:
+    max_x = float(np.nanmax(Ix)) if getattr(Ix, "size", 0) else 0.0
+    max_y = float(np.nanmax(Iy)) if getattr(Iy, "size", 0) else 0.0
+    max_x = max(0.0, max_x)
+    max_y = max(0.0, max_y)
+    with _roi_intensity_lock:
+        prev_x, prev_y = _roi_cuts_peak.get(rid, (None, None))
+        base_x = prev_x if prev_x is not None else 0.0
+        base_y = prev_y if prev_y is not None else 0.0
+        peak_x = max(base_x, max_x, 1.0)
+        peak_y = max(base_y, max_y, 1.0)
+        _roi_cuts_peak[rid] = (peak_x, peak_y)
+        if prev_x is None or prev_y is None:
+            app.logger.debug(f"ROI {rid}: initializing cuts peaks to ({peak_x:.3f}, {peak_y:.3f})")
+        else:
+            changed = []
+            if peak_x > prev_x:
+                changed.append(f"Ix {prev_x:.3f}->{peak_x:.3f}")
+            if peak_y > prev_y:
+                changed.append(f"Iy {prev_y:.3f}->{peak_y:.3f}")
+            if changed:
+                joined = '; '.join(changed)
+                app.logger.debug(f"ROI {rid}: cuts peaks updated {joined}")
+        return peak_x, peak_y
+
+
+def _get_roi_cuts_peak(rid: str) -> Tuple[float, float]:
+    with _roi_intensity_lock:
+        return _roi_cuts_peak.get(rid, (1.0, 1.0))
+
+
+def _reset_roi_peak_history(rid: str) -> None:
+    with _roi_intensity_lock:
+        had_peak = rid in _roi_peak_intensity
+        had_cuts = rid in _roi_cuts_peak
+        _roi_peak_intensity.pop(rid, None)
+        _roi_cuts_peak.pop(rid, None)
+    app.logger.debug(f"ROI {rid}: peak history reset (intensity={had_peak}, cuts={had_cuts})")
+
+
+def _normalize_to_u8(arr: np.ndarray, peak: float) -> np.ndarray:
     a = np.asarray(arr, dtype=np.float32)
-    span = max(1e-6, hi - lo)
-    norm = np.clip((a - lo) / span, 0.0, 1.0)
+    a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+    hi = max(1.0, float(peak))
+    norm = np.clip(a / hi, 0.0, 1.0)
     return (norm * 255.0).astype(np.uint8)
 
 
@@ -358,20 +393,26 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
         return None
 
     compute = compute_mode or "none"
+    cm = cam_service.get_colormap()
+    peak = _update_roi_peak_intensity(rid, roi_gray)
+
     if compute == "none" or not result:
-        lo, hi = _update_roi_scale(rid, roi_gray.astype(np.float32))
-        roi_u8 = _normalize_to_u8(roi_gray.astype(np.float32), lo, hi)
-        cm = cam_service.get_colormap()
+        roi_u8 = _normalize_to_u8(roi_gray, peak)
         return apply_colormap_to_gray(roi_u8, cm)
 
     try:
         proc = result.get("img_for_spec")
         if proc is None or not isinstance(proc, np.ndarray) or proc.size == 0:
-            proc = roi_gray.astype(np.float32)
-        proc = np.asarray(proc, dtype=np.float32)
+            proc = np.asarray(roi_gray, dtype=np.float32)
+        else:
+            proc = np.asarray(proc, dtype=np.float32)
         if proc.ndim == 3:
             proc = np.mean(proc, axis=-1)
         proc = np.nan_to_num(proc, nan=0.0, posinf=0.0, neginf=0.0)
+
+        peak = _update_roi_peak_intensity(rid, proc)
+        roi_u8 = _normalize_to_u8(proc, peak)
+        img = apply_colormap_to_gray(roi_u8, cm)
 
         cy = float(result.get("cy", 0.0))
         cx = float(result.get("cx", 0.0))
@@ -382,36 +423,6 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
         fit_y = result.get("gauss_fit_y")
         gauss_rx = (fit_x or {}).get("radius")
         gauss_ry = (fit_y or {}).get("radius")
-
-        # Get metrics for normalization
-        snap = metrics.get_snapshot()
-        roi_metrics = snap.get("rois", [])
-        y_max_integral_map = snap.get("y_max_integral", {})
-        y_max_pixel_map = snap.get("y_max_pixel", {})
-        current_metric = next((m for m in roi_metrics if m.get("id") == rid), None)
-
-        lo, hi = 0.0, 255.0  # Default fallback
-        if current_metric:
-            value_per_ms = current_metric.get("value_per_ms", 0.0)
-            y_max_integral = y_max_integral_map.get(rid, 0.0)
-            y_max_pixel = y_max_pixel_map.get(rid, 0.0)
-
-            power_bar_fraction = 0.0
-            if y_max_integral > 1e-9:
-                power_bar_fraction = np.clip(value_per_ms / y_max_integral, 0.0, 1.0)
-
-            vmax_ms = power_bar_fraction * y_max_pixel
-            exp_us = snap.get("exposure_us", 1000)
-            exp_ms = max(1e-3, exp_us / 1000.0)
-
-            lo = 0.0
-            hi = max(1.0, vmax_ms * exp_ms)
-        else:
-            lo, hi = _update_roi_scale(rid, proc)
-
-        roi_u8 = _normalize_to_u8(proc, lo, hi)
-        cm = cam_service.get_colormap()
-        img = apply_colormap_to_gray(roi_u8, cm)
 
         major_r, minor_r, ang = rx_iso, ry_iso, theta
         if ry_iso > rx_iso:
@@ -471,6 +482,8 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
 
 
 
+
+
 _PLOT_BG = (29, 21, 17)
 _PLOT_AXIS = (82, 86, 96)
 _PLOT_TEXT_PRI = (230, 232, 236)
@@ -494,6 +507,7 @@ def _draw_cuts_panel(
     gauss_center: float,
     gauss_radius: float,
     pixel_size: Optional[float],
+    value_max: float,
 ) -> None:
     h, w = panel.shape[:2]
     top, bottom, left, right = 28, 32, 36, 18
@@ -525,10 +539,7 @@ def _draw_cuts_panel(
     pos_norm = np.clip((pos - base) / span, 0.0, 1.0)
     x_coords = left + np.clip(np.round(pos_norm * (plot_w - 1)).astype(np.int32), 0, plot_w - 1)
 
-    max_val = float(np.max(vals)) if vals.size else 0.0
-    if not np.isfinite(max_val) or max_val <= 0.0:
-        alt = float(np.max(np.abs(vals))) if vals.size else 0.0
-        max_val = alt if alt > 0.0 else 1.0
+    max_val = max(1.0, float(value_max))
     val_norm = np.clip(vals / max_val, 0.0, 1.0)
     y_coords = (h - bottom) - np.clip(np.round(val_norm * (plot_h - 1)).astype(np.int32), 0, plot_h - 1)
 
@@ -570,6 +581,8 @@ def _draw_cuts_panel(
             cv2.polylines(panel, [g_pts.reshape(-1, 1, 2)], False, _COLOR_GAUSS, 1, cv2.LINE_AA)
 
 
+
+
 def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
     entry = beam_manager.get(rid)
     compute_mode = str(entry.get("compute") if entry else "none").lower()
@@ -587,6 +600,10 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
     try:
         x_positions, Ix = result["Ix_spectrum"]
         y_positions, Iy = result["Iy_spectrum"]
+        Ix = np.asarray(Ix, dtype=np.float32)
+        Iy = np.asarray(Iy, dtype=np.float32)
+        peak_x, peak_y = _update_roi_cuts_peak(rid, Ix, Iy)
+
         fit_x = result.get("gauss_fit_x") or {}
         fit_y = result.get("gauss_fit_y") or {}
         cx_iso = float(result.get("cx", 0.0))
@@ -613,7 +630,7 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
         with _plot_lock:
             _draw_cuts_panel(
                 canvas[:, :240],
-                x_positions,
+                np.asarray(x_positions, dtype=np.float32),
                 Ix,
                 title=title_x,
                 axis_label="x (local px)",
@@ -624,10 +641,11 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
                 gauss_center=gauss_cx,
                 gauss_radius=gauss_rx,
                 pixel_size=pixel_size_val,
+                value_max=peak_x,
             )
             _draw_cuts_panel(
                 canvas[:, 240:],
-                y_positions,
+                np.asarray(y_positions, dtype=np.float32),
                 Iy,
                 title=title_y,
                 axis_label="y (local px)",
@@ -638,12 +656,16 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
                 gauss_center=gauss_cy,
                 gauss_radius=gauss_ry,
                 pixel_size=pixel_size_val,
+                value_max=peak_y,
             )
             cv2.line(canvas, (240, 24), (240, 240 - 24), _PLOT_AXIS, 1, cv2.LINE_AA)
         return canvas
     except Exception as exc:
         app.logger.warning(f"compose cuts error for ROI {rid}: {exc}", exc_info=True)
         return None
+
+
+
 
 # Background metrics loop
 def _metrics_loop():
@@ -847,6 +869,7 @@ def rois_item(rid: str):
         if ok:
             metrics.remove_roi_metrics(rid)
             beam_manager.remove(rid)
+            _reset_roi_peak_history(rid)
         return jsonify({"deleted": bool(ok)})
 
     data = request.get_json(silent=True) or {}
@@ -860,6 +883,7 @@ def rois_item(rid: str):
 @app.route("/roi/<rid>/reset_max_values", methods=["POST"])
 def roi_reset_max_values(rid: str):
     metrics.reset_max_values(rid)
+    _reset_roi_peak_history(rid)
     return jsonify({"ok": True})
 
 # Metrics polling
@@ -890,8 +914,8 @@ def _roi_stream_frames(rid: str) -> Generator[bytes, None, None]:
         if roi_gray.size == 0:
             img = _placeholder("ROI out of bounds", (256, 256))
         else:
-            lo, hi = _update_roi_scale(rid, roi_gray.astype(np.float32))
-            roi_u8 = _normalize_to_u8(roi_gray.astype(np.float32), lo, hi)
+            peak = _update_roi_peak_intensity(rid, roi_gray)
+            roi_u8 = _normalize_to_u8(roi_gray, peak)
             cm = cam_service.get_colormap()
             img = apply_colormap_to_gray(roi_u8, cm)
         jpg = _encode_jpeg(img)
