@@ -202,6 +202,7 @@ class BeamAnalysisManager:
             "background_subtraction": bg_sub,
             "rotation_angle": rot_angle,
             "compute_gaussian": compute_gauss,
+            "compute_iso": compute in ("both", "second"),
         }
 
         if should_analyze and images:
@@ -588,6 +589,7 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
     compute_mode = str(entry.get("compute") if entry else "none").lower()
     result = entry.get("result") if entry else None
     pixel_size_val = entry.get("pixel_size") if entry else None
+    draw_iso = compute_mode in ("both", "second")
     try:
         pixel_size_val = float(pixel_size_val)
     except (TypeError, ValueError):
@@ -608,8 +610,8 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
         fit_y = result.get("gauss_fit_y") or {}
         cx_iso = float(result.get("cx_iso", result.get("cx", 0.0)))
         cy_iso = float(result.get("cy_iso", result.get("cy", 0.0)))
-        rx_iso = float(result.get("rx_iso", 0.0))
-        ry_iso = float(result.get("ry_iso", 0.0))
+        rx_iso = float(result.get("rx_iso", 0.0)) if draw_iso else 0.0
+        ry_iso = float(result.get("ry_iso", 0.0)) if draw_iso else 0.0
         gauss_cx = float(fit_x.get("centre", cx_iso))
         gauss_cy = float(fit_y.get("centre", cy_iso))
         gauss_rx = float(fit_x.get("radius", 0.0)) if fit_x else 0.0

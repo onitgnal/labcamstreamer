@@ -676,137 +676,157 @@ def analyze_beam(
     background_subtraction: bool = True,
     rotation_angle: Optional[float] = None,
     compute_gaussian: bool = True,
+    compute_iso: bool = True,
 ) -> Dict[str, object]:
     """Analyse a beam image and return ISO and Gaussian parameters.
 
-    Runs the ISO 11146 second-moment analysis and, optionally, 1D
-    Gaussian fits along the principal axes. Results include the spectra
-    and (when requested) the fit parameters.
-
-    Parameters
-    ----------
-    img : array_like
-        2D beam image.
-    aperture_factor : float, optional
-        Crop half-size factor relative to the current radius (default 3.0).
-    principal_axes_rot : bool, optional
-        If True, use a rotated ROI aligned to the principal axes for spectra.
-    clip_negatives : bool or {"none", "zero", "otsu"}, optional
-        Negative handling for second-moment computation and spectra.
-        See :func:`iso_second_moment`.
-    angle_clip_mode : bool or {"none", "zero", "otsu"}, optional
-        Background handling used only during angle estimation. See
-        :func:`iso_second_moment`.
-    tol : float, optional
-        Convergence tolerance in pixels for the ISO method.
-    max_iterations : int, optional
-        Maximum number of iterations for the ISO method.
-    background_subtraction : bool, optional
-        If True (default), subtract a robust affine background. If False,
-        analyse raw data.
-    rotation_angle : float or None, optional
-        Fixed principal-axis angle (radians). If provided, overrides the
-        automatically estimated angle.
-    compute_gaussian : bool, optional
-        If True (default), perform 1D Gaussian fits and return
-        ``gauss_fit_x`` and ``gauss_fit_y``. If False, those entries are
-        ``None``.
-
-    Returns
-    -------
-    dict
-        Similar to :func:`iso_second_moment`, but with ``cx`` and ``cy``
-        guaranteed to be in local coordinates of the returned ``img_for_spec``.
+    When ``compute_iso`` is False the ISO 11146 loop is skipped and only the
+    lightweight Gaussian fits (along the image axes) are performed.
     """
-    # run ISO second‑moment analysis
-    iso_result = iso_second_moment(
-        img,
-        aperture_factor=aperture_factor,
-        principal_axes_rot=principal_axes_rot,
-        clip_negatives=clip_negatives,
-        angle_clip_mode=angle_clip_mode,
-        tol=tol,
-        max_iterations=max_iterations,
-        background_subtraction=background_subtraction,
-        rotation_angle=rotation_angle,
-    )
-    # compute spectra along principal axes using the rotated image when available
-    rotated_img = iso_result["rotated_img"]
-    processed_img = iso_result["processed_img"]
-    crop_origin = iso_result["crop_origin"]
+    clip_mode = _resolve_clip_mode(clip_negatives)
+    angle_mode = _resolve_clip_mode(angle_clip_mode, default=clip_mode)
 
-    if processed_img is None or processed_img.size == 0:
-        raise ValueError("ISO analysis returned an empty processed image; cannot compute spectra.")
+    raw_img = np.asarray(img, dtype=np.float64)
 
-    if rotated_img is not None and rotated_img.size > 0:
-        spectrum_img = rotated_img
+    if compute_iso:
+        iso_result = iso_second_moment(
+            raw_img,
+            aperture_factor=aperture_factor,
+            principal_axes_rot=principal_axes_rot,
+            clip_negatives=clip_negatives,
+            angle_clip_mode=angle_clip_mode,
+            tol=tol,
+            max_iterations=max_iterations,
+            background_subtraction=background_subtraction,
+            rotation_angle=rotation_angle,
+        )
+        rotated_img = iso_result.get("rotated_img")
+        processed_img = iso_result.get("processed_img")
+        if processed_img is None or processed_img.size == 0:
+            raise ValueError("ISO analysis returned an empty processed image; cannot compute spectra.")
+        if rotated_img is not None and getattr(rotated_img, "size", 0) > 0:
+            spectrum_img = rotated_img
+        else:
+            spectrum_img = processed_img
+        crop_origin = iso_result.get("crop_origin", (0, 0))
     else:
+        if background_subtraction:
+            processed_base = bg_subtract(raw_img, clip_negatives="none")
+        else:
+            processed_base = raw_img.copy()
+        if clip_mode == "none":
+            processed_img = processed_base
+        else:
+            processed_img = processed_base.copy()
+            _apply_clip_mode(processed_img, clip_mode)
+        processed_img = np.nan_to_num(processed_img, nan=0.0, posinf=0.0, neginf=0.0)
+        rotated_img = None
         spectrum_img = processed_img
+        crop_origin = (0, 0)
+        iso_result = {
+            "phi": 0.0,
+            "rx": 0.0,
+            "ry": 0.0,
+            "cx": 0.0,
+            "cy": 0.0,
+            "iterations": 0,
+            "processed_img": processed_img,
+            "rotated_img": None,
+            "crop_origin": crop_origin,
+        }
+
+    spectrum_img = np.asarray(spectrum_img, dtype=np.float64)
+    if spectrum_img.ndim != 2:
+        spectrum_img = np.mean(spectrum_img, axis=-1)
+    spectrum_img = np.nan_to_num(spectrum_img, nan=0.0, posinf=0.0, neginf=0.0)
+
+    processed_img = np.asarray(processed_img, dtype=np.float64)
+    if processed_img.ndim != 2:
+        processed_img = np.mean(processed_img, axis=-1)
+    processed_img = np.nan_to_num(processed_img, nan=0.0, posinf=0.0, neginf=0.0)
+
+    if spectrum_img.size == 0:
+        raise ValueError("Spectrum image is empty; cannot compute principal-axis spectra.")
 
     h_spec, w_spec = spectrum_img.shape
     x_positions = np.arange(w_spec, dtype=np.float64)
     y_positions = np.arange(h_spec, dtype=np.float64)
-
-    # store the non-rotated image for downstream consumers (e.g. plotting)
     img_for_spec = processed_img
-
-    # Integrated profiles along the principal axes remain based on the
-    # rotation-aligned image to keep spectra and Gaussian fits unchanged.
-    if spectrum_img is None or spectrum_img.size == 0:
-        raise ValueError("ISO analysis returned an empty spectrum image; cannot compute principal-axis spectra.")
 
     Ix = spectrum_img.sum(axis=0)
     Iy = spectrum_img.sum(axis=1)
 
-    # Optionally perform Gaussian fits along principal axes
-    gauss_fit_x = None
-    gauss_fit_y = None
-
-    # The display centroid should always be computed from the unrotated image,
-    # as this is what is returned for plotting.
-    # If rotation was used, iso_result['cx'] is in the rotated frame.
     cx_display, cy_display = _get_centroid(img_for_spec)
 
-    if compute_gaussian:
-        # For Gaussian fits, we need the centroid in the coordinate system of
-        # the spectrum image (which may be rotated).
-        centre_x_fit = iso_result["cx"]
-        centre_y_fit = iso_result["cy"]
-        rx_fit = iso_result["rx"]
-        ry_fit = iso_result["ry"]
+    Ix_sum = float(Ix.sum())
+    if Ix_sum > 0.0:
+        mean_x = float((Ix * x_positions).sum() / Ix_sum)
+        var_x = float(((x_positions - mean_x) ** 2 * Ix).sum() / Ix_sum)
+    else:
+        mean_x = cx_display
+        var_x = float((w_spec ** 2) / 12.0)
 
-        # fit along x
-        params_x, cov_x = fit_gaussian(x_positions, Ix, (Ix.max(), centre_x_fit, max(rx_fit, 1e-3)))
-        # fit along y
-        params_y, cov_y = fit_gaussian(y_positions, Iy, (Iy.max(), centre_y_fit, max(ry_fit, 1e-3)))
-        gauss_fit_x = {
-            "amplitude": params_x[0],
-            "centre": params_x[1],
-            "radius": params_x[2],
-            "covariance": cov_x,
-        }
-        gauss_fit_y = {
-            "amplitude": params_y[0],
-            "centre": params_y[1],
-            "radius": params_y[2],
-            "covariance": cov_y,
-        }
+    Iy_sum = float(Iy.sum())
+    if Iy_sum > 0.0:
+        mean_y = float((Iy * y_positions).sum() / Iy_sum)
+        var_y = float(((y_positions - mean_y) ** 2 * Iy).sum() / Iy_sum)
+    else:
+        mean_y = cy_display
+        var_y = float((h_spec ** 2) / 12.0)
+
+    radius_guess_x = float(np.sqrt(max(var_x, 1e-6)))
+    radius_guess_y = float(np.sqrt(max(var_y, 1e-6)))
+
+    if compute_iso:
+        centre_x_fit = float(iso_result.get("cx", mean_x))
+        centre_y_fit = float(iso_result.get("cy", mean_y))
+        rx_fit = float(max(iso_result.get("rx", radius_guess_x), 1e-3))
+        ry_fit = float(max(iso_result.get("ry", radius_guess_y), 1e-3))
+    else:
+        centre_x_fit = mean_x
+        centre_y_fit = mean_y
+        rx_fit = max(radius_guess_x, 1e-3)
+        ry_fit = max(radius_guess_y, 1e-3)
+        iso_result["cx"] = centre_x_fit
+        iso_result["cy"] = centre_y_fit
+        iso_result["rx"] = rx_fit
+        iso_result["ry"] = ry_fit
+
+    gauss_fit_x = None
+    gauss_fit_y = None
+    if compute_gaussian:
+        if Ix_sum > 0.0:
+            params_x, cov_x = fit_gaussian(x_positions, Ix, (Ix.max(), centre_x_fit, rx_fit))
+            gauss_fit_x = {
+                "amplitude": params_x[0],
+                "centre": params_x[1],
+                "radius": params_x[2],
+                "covariance": cov_x,
+            }
+        if Iy_sum > 0.0:
+            params_y, cov_y = fit_gaussian(y_positions, Iy, (Iy.max(), centre_y_fit, ry_fit))
+            gauss_fit_y = {
+                "amplitude": params_y[0],
+                "centre": params_y[1],
+                "radius": params_y[2],
+                "covariance": cov_y,
+            }
 
     return {
         "img_for_spec": img_for_spec,
-        "img_for_spec_origin": crop_origin,
-        "theta": iso_result["phi"],
-        "rx_iso": iso_result["rx"],
-        "ry_iso": iso_result["ry"],
-        "cx_iso": float(iso_result["cx"]),
-        "cy_iso": float(iso_result["cy"]),
-        "cx": cx_display,
-        "cy": cy_display,
+        "img_for_spec_origin": iso_result.get("crop_origin", (0, 0)),
+        "theta": iso_result.get("phi", 0.0),
+        "rx_iso": float(iso_result.get("rx", 0.0)),
+        "ry_iso": float(iso_result.get("ry", 0.0)),
+        "cx_iso": float(iso_result.get("cx", centre_x_fit)),
+        "cy_iso": float(iso_result.get("cy", centre_y_fit)),
+        "cx": float(cx_display),
+        "cy": float(cy_display),
         "Ix_spectrum": (x_positions, Ix),
         "Iy_spectrum": (y_positions, Iy),
         "gauss_fit_x": gauss_fit_x,
         "gauss_fit_y": gauss_fit_y,
-        "iterations": iso_result["iterations"],
+        "iterations": int(iso_result.get("iterations", 0)),
     }
 
 
