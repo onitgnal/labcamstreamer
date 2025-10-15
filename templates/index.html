@@ -24,6 +24,10 @@
             <input id="cameraToggle" type="checkbox" />
           </label>
           <button id="saveBtn" class="primary">Save Data</button>
+          <label class="row space">
+            <span>Background Subtraction</span>
+            <input id="backgroundSubtractionToggle" type="checkbox" />
+          </label>
         </section>
 
         <section class="panel">
@@ -139,5 +143,16 @@
   </div>
 
   <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+
+  <div id="backgroundSubtractionModal" class="modal" hidden>
+    <div class="modal-content">
+      <span class="close-button">&times;</span>
+      <h2>Background Subtraction</h2>
+      <p>Please block the beam to capture the background. The application will capture a number of frames and average them to create a background image that will be subtracted from all subsequent frames.</p>
+      <label for="numFrames">Number of frames to average:</label>
+      <input type="number" id="numFrames" name="numFrames" value="10" min="1">
+      <button id="startBgSubtraction" class="primary">Start</button>
+    </div>
+  </div>
 </body>
 </html>

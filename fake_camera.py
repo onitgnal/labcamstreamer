@@ -5,7 +5,17 @@ from typing import Callable, Optional, Tuple
 
 import cv2
 import numpy as np
-from vmbpy import Frame, FrameStatus, PixelFormat
+try:
+    from vmbpy import Frame, FrameStatus, PixelFormat
+except ImportError:
+    # Create dummy classes if vmbpy is not available
+    class Frame: pass
+    class FrameStatus:
+        Complete = "Complete"
+    class PixelFormat:
+        Bgr8 = "Bgr8"
+        Mono16 = "Mono16"
+        Mono8 = "Mono8"
 
 # ----- Mock VmbPy objects for API compatibility -----
 
@@ -284,6 +294,24 @@ class FakeCamera:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop_streaming()
+
+    def generate_background_frame(self) -> np.ndarray:
+        """Generates a noise-only frame as a NumPy array."""
+        ideal_frame = np.full((self.height, self.width), float(self.background_level), dtype=np.float32)
+
+        if self._static_gradient is not None:
+            ideal_frame += self._static_gradient
+
+        exposure_us = self._features["ExposureTime"].get()
+        exposure_factor = exposure_us / 20000.0
+        exposed_frame = ideal_frame * exposure_factor
+
+        background_noise = self._rng.normal(0.0, self.background_noise_std, ideal_frame.shape).astype(np.float32)
+        read_noise = self._rng.normal(0.0, self.read_noise_level, ideal_frame.shape).astype(np.float32)
+        noisy_frame = exposed_frame + background_noise + read_noise
+
+        final_frame = np.clip(noisy_frame, 0, 65535).astype(np.uint16)
+        return final_frame
 
 # Example usage (for testing)
 if __name__ == '__main__':

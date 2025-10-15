@@ -10,6 +10,11 @@
   const cameraToggle = qs('#cameraToggle');
   const cameraSelect = qs('#cameraSelect');
   const saveBtn = qs('#saveBtn');
+  const backgroundSubtractionToggle = qs('#backgroundSubtractionToggle');
+  const backgroundSubtractionModal = qs('#backgroundSubtractionModal');
+  const closeModalButton = backgroundSubtractionModal.querySelector('.close-button');
+  const startBgSubtractionBtn = qs('#startBgSubtraction');
+  const numFramesInput = qs('#numFrames');
 
   const expSlider = qs('#expSlider');
   const expLabel = qs('#expLabel');
@@ -777,6 +782,41 @@
   });
 
   window.addEventListener('resize', resizeCanvasToImage);
+
+  // ----- Background Subtraction Logic -----
+  backgroundSubtractionToggle.addEventListener('change', async () => {
+    if (backgroundSubtractionToggle.checked) {
+      backgroundSubtractionModal.hidden = false;
+    } else {
+      try {
+        await postJSON('/background_subtraction', { enabled: false });
+        logToServer('info', 'Background subtraction disabled');
+      } catch (e) {
+        logToServer('error', 'Failed to disable background subtraction', { error: e.toString() });
+      }
+    }
+  });
+
+  closeModalButton.addEventListener('click', () => {
+    backgroundSubtractionModal.hidden = true;
+    backgroundSubtractionToggle.checked = false;
+  });
+
+  startBgSubtractionBtn.addEventListener('click', async () => {
+    const numFrames = parseInt(numFramesInput.value, 10);
+    if (isNaN(numFrames) || numFrames <= 0) {
+      alert('Please enter a valid number of frames.');
+      return;
+    }
+    backgroundSubtractionModal.hidden = true;
+    try {
+      await postJSON('/background_subtraction', { enabled: true, num_frames: numFrames });
+      logToServer('info', 'Background subtraction enabled', { num_frames: numFrames });
+    } catch (e) {
+      logToServer('error', 'Failed to enable background subtraction', { error: e.toString() });
+      backgroundSubtractionToggle.checked = false;
+    }
+  });
 
   // ----- Bootstrap -----
   (async function init() {

@@ -850,6 +850,25 @@ def beam_options():
                 pass
         return jsonify(dict(_beam_opts))
 
+# Background Subtraction
+@app.route("/background_subtraction", methods=["POST"])
+def background_subtraction():
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", False))
+    if enabled:
+        num_frames = int(data.get("num_frames", 10))
+        try:
+            cam_service.start_background_subtraction(num_frames)
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    else:
+        try:
+            cam_service.stop_background_subtraction()
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
 # Camera On/Off
 @app.route("/camera", methods=["POST"])
 def camera_toggle():

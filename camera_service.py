@@ -7,8 +7,36 @@ from typing import Optional, Tuple, Union, List, Dict
 
 import cv2
 import numpy as np
-from vmbpy import (VmbSystem, VmbFeatureError, VmbCameraError, PixelFormat, COLOR_PIXEL_FORMATS,
-                   MONO_PIXEL_FORMATS, FrameStatus, Camera, Stream, Frame, intersect_pixel_formats)
+try:
+    from vmbpy import (VmbSystem, VmbFeatureError, VmbCameraError, PixelFormat, COLOR_PIXEL_FORMATS,
+                       MONO_PIXEL_FORMATS, FrameStatus, Camera, Stream, Frame, intersect_pixel_formats)
+except ImportError:
+    # Create dummy classes if vmbpy is not available, so fake camera can run
+    class VmbSystem:
+        @staticmethod
+        def get_instance():
+            return VmbSystem()
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+        def get_all_cameras(self):
+            return []
+    class VmbFeatureError(Exception): pass
+    class VmbCameraError(Exception): pass
+    class PixelFormat:
+        Bgr8 = "Bgr8"
+        Mono16 = "Mono16"
+        Mono8 = "Mono8"
+    COLOR_PIXEL_FORMATS = []
+    MONO_PIXEL_FORMATS = []
+    class FrameStatus:
+        Complete = "Complete"
+    class Camera: pass
+    class Stream: pass
+    class Frame: pass
+    def intersect_pixel_formats(a, b):
+        return []
 
 from fake_camera import FakeCamera, FakeFrame
 
@@ -91,6 +119,22 @@ class CameraService:
                     # NumPy BGR image
                     bgr = display.as_opencv_image()
 
+                    # <<< NEW: Perform background subtraction if enabled >>>
+                    with self.service._frame_lock:
+                        bg_sub_enabled = self.service._background_subtraction_enabled
+                        bg_frame = self.service._background_frame
+
+                    if bg_sub_enabled and bg_frame is not None:
+                        # Convert background (float) to BGR uint8 for subtraction
+                        bg_gray_u8 = np.clip(bg_frame, 0, 255).astype(np.uint8)
+                        bg_bgr_u8 = cv2.cvtColor(bg_gray_u8, cv2.COLOR_GRAY2BGR)
+
+                        # Subtract BGR frames
+                        bgr_float = bgr.astype(np.float32)
+                        subtracted_bgr = bgr_float - bg_bgr_u8.astype(np.float32)
+                        bgr = np.clip(subtracted_bgr, 0, 255).astype(np.uint8)
+
+
                     # Update latest frames (copy to decouple from buffer reuse)
                     with self.service._frame_lock:
                         self.service._latest_bgr = bgr.copy()
@@ -133,6 +177,8 @@ class CameraService:
         self._latest_bgr: Optional[np.ndarray] = None
         self._latest_gray: Optional[np.ndarray] = None
         self._colormap: str = "jet"
+        self._background_frame: Optional[np.ndarray] = None
+        self._background_subtraction_enabled = False
 
     def set_default_camera_id(self, camera_id: str):
         self._logger.info(f"Default camera ID set to: {camera_id}")
@@ -367,6 +413,49 @@ class CameraService:
         with self._colormap_lock:
             self._colormap = mode
             return self._colormap
+
+    def start_background_subtraction(self, num_frames: int):
+        if not self._cam:
+            raise RuntimeError("Camera not running")
+
+        frames = []
+        if isinstance(self._cam, FakeCamera):
+            for _ in range(num_frames):
+                frame_data_16bit = self._cam.generate_background_frame()
+                frame_data_8bit = (frame_data_16bit >> 8).astype(np.uint8)
+                frames.append(frame_data_8bit)
+        else:
+            # For real cameras, get from the display queue.
+            # This relies on the user blocking the beam.
+            collected_frames = 0
+            start_time = time.time()
+            # 5 second timeout to collect frames
+            while collected_frames < num_frames and (time.time() - start_time) < 5.0:
+                try:
+                    bgr = self._display_queue.get(timeout=0.1)
+                    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                    frames.append(gray)
+                    collected_frames += 1
+                except Exception:
+                    pass # Keep trying until timeout
+
+        if not frames:
+            raise RuntimeError(f"Could not capture any background frames within the time limit.")
+
+        # Average the collected frames. Convert to float for calculation.
+        avg_frame_float = np.mean([f.astype(np.float32) for f in frames], axis=0)
+
+        with self._frame_lock:
+            self._background_frame = avg_frame_float
+            self._background_subtraction_enabled = True
+
+        self._logger.info(f"Background subtraction enabled, averaged {len(frames)} frames.")
+
+    def stop_background_subtraction(self):
+        with self._frame_lock:
+            self._background_frame = None
+            self._background_subtraction_enabled = False
+        self._logger.info("Background subtraction disabled.")
 
     # ---------- Frames and MJPEG ----------
 
