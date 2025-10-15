@@ -117,32 +117,34 @@ class CameraService:
                         display = frame.convert_pixel_format(OPENCV_DISPLAY_FORMAT)
 
                     # NumPy BGR image
-                    bgr = display.as_opencv_image()
+                    bgr_input = display.as_opencv_image()
 
-                    # <<< NEW: Perform background subtraction if enabled >>>
+                    final_bgr = None
+                    final_gray = None
+
                     with self.service._frame_lock:
                         bg_sub_enabled = self.service._background_subtraction_enabled
                         bg_frame = self.service._background_frame
 
                     if bg_sub_enabled and bg_frame is not None:
-                        # Convert background (float) to BGR uint8 for subtraction
-                        bg_gray_u8 = np.clip(bg_frame, 0, 255).astype(np.uint8)
-                        bg_bgr_u8 = cv2.cvtColor(bg_gray_u8, cv2.COLOR_GRAY2BGR)
+                        gray_input = cv2.cvtColor(bgr_input, cv2.COLOR_BGR2GRAY)
+                        gray_float = gray_input.astype(np.float32)
+                        subtracted_gray_float = gray_float - bg_frame
 
-                        # Subtract BGR frames
-                        bgr_float = bgr.astype(np.float32)
-                        subtracted_bgr = bgr_float - bg_bgr_u8.astype(np.float32)
-                        bgr = np.clip(subtracted_bgr, 0, 255).astype(np.uint8)
-
+                        final_gray = np.clip(subtracted_gray_float, 0, 255).astype(np.uint8)
+                        final_bgr = cv2.cvtColor(final_gray, cv2.COLOR_GRAY2BGR)
+                    else:
+                        final_bgr = bgr_input
+                        final_gray = cv2.cvtColor(bgr_input, cv2.COLOR_BGR2GRAY)
 
                     # Update latest frames (copy to decouple from buffer reuse)
                     with self.service._frame_lock:
-                        self.service._latest_bgr = bgr.copy()
-                        self.service._latest_gray = cv2.cvtColor(self.service._latest_bgr, cv2.COLOR_BGR2GRAY)
+                        self.service._latest_bgr = final_bgr.copy()
+                        self.service._latest_gray = final_gray.copy()
 
                     # Push to display queue (drop if full to keep latency low)
                     try:
-                        self.service._display_queue.put(self.service._latest_bgr, block=False)
+                        self.service._display_queue.put(final_bgr, block=False)
                     except Exception:
                         pass
 
