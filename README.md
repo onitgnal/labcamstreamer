@@ -89,3 +89,4 @@ Firewall note (Windows): allow Python inbound for local network access.
 
 ## License
 Internal/Project use. Verify Allied Vision SDK license for deployment constraints.
+
