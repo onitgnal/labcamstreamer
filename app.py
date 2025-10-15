@@ -386,6 +386,8 @@ def _get_roi_gray_image(rid: str, *, entry: Optional[Dict[str, object]] = None) 
         return None
     gray = cam_service.get_latest_gray()
     if gray is None or getattr(gray, "size", 0) == 0:
+        gray = cam_service.get_latest_gray(raw=True)
+    if gray is None or getattr(gray, "size", 0) == 0:
         return None
     h_img, w_img = gray.shape[:2]
     x0 = max(0, min(int(r.x), w_img - 1))
@@ -685,7 +687,9 @@ def _metrics_loop():
     while True:
         try:
             cam_service.wait_for_frame_signal(timeout=0.5)
-            gray = cam_service.get_latest_gray()
+            gray_processed = cam_service.get_latest_gray()
+            if gray_processed is None or getattr(gray_processed, "size", 0) == 0:
+                gray_processed = cam_service.get_latest_gray(raw=True)
             exp = cam_service.get_exposure_us()
             size = cam_service.get_frame_size()
             if size != last_size:
@@ -693,9 +697,9 @@ def _metrics_loop():
                 roi_registry.clamp_all(size)
                 last_size = size
             rois = roi_registry.list()
-            metrics.update(gray, exp, rois)
+            metrics.update(gray_processed, exp, rois)
             opts = _get_beam_options_copy()
-            beam_manager.update(gray, rois, opts)
+            beam_manager.update(gray_processed, rois, opts)
         except Exception as e:
             app.logger.error(f"Exception in metrics loop: {e}", exc_info=True)
             time.sleep(0.1)
@@ -709,6 +713,15 @@ _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 def _sanitize_filename(value: str, fallback: str) -> str:
     safe = _SAFE_FILENAME_RE.sub('_', value).strip('._-')
     return safe or fallback
+
+
+def _json_default(obj):
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 
 # ----- Helpers -----
 def mjpeg_response(gen: Generator[bytes, None, None]) -> Response:
@@ -725,6 +738,49 @@ def _encode_png(img: np.ndarray) -> Optional[bytes]:
 def _encode_bmp(img: np.ndarray) -> Optional[bytes]:
     ok, buf = cv2.imencode('.bmp', img)
     return buf.tobytes() if ok else None
+
+
+def _prepare_gray_for_bmp(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if arr is None:
+        return None
+    img = np.asarray(arr)
+    if img.ndim == 3 and img.shape[2] == 1:
+        img = img[:, :, 0]
+    img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
+    if img.ndim != 2:
+        return None
+    if img.dtype in (np.uint8, np.uint16):
+        return img
+    if np.issubdtype(img.dtype, np.integer):
+        img = np.clip(img, 0, None)
+        max_val = int(np.max(img)) if img.size else 0
+        if max_val <= 255:
+            return img.astype(np.uint8)
+        return np.clip(img, 0, 65535).astype(np.uint16)
+    if np.issubdtype(img.dtype, np.floating):
+        img = np.clip(img, 0.0, None)
+        max_val = float(np.max(img)) if img.size else 0.0
+        if max_val <= 255.0:
+            return np.rint(img).astype(np.uint8)
+        return np.rint(np.clip(img, 0.0, 65535.0)).astype(np.uint16)
+    return None
+
+
+def _encode_gray_bmp(arr: Optional[np.ndarray]) -> Optional[bytes]:
+    prepared = _prepare_gray_for_bmp(arr)
+    if prepared is None:
+        return None
+    return _encode_bmp(prepared)
+
+
+def _safe_roi_fs_name(rid: str) -> str:
+    return _sanitize_filename(rid, rid.replace(':', '_').replace('/', '_'))
+
+
+def _zip_write_npy(zf: zipfile.ZipFile, arcname: str, arr: np.ndarray) -> None:
+    buf = io.BytesIO()
+    np.save(buf, arr)
+    zf.writestr(arcname, buf.getvalue())
 
 
 def _placeholder(text: str, size=(640, 360)) -> np.ndarray:
@@ -1059,42 +1115,18 @@ def roi_profile_save(rid: str):
     return send_file(mem, mimetype="application/zip", as_attachment=True, download_name=f"{base}.zip")
 
 
-def _format_physical(value: float, pixel_size: Optional[float]) -> str:
-    if pixel_size is None:
-        return ""
-    return f" ({value * pixel_size:.6g} units)"
-
-
-def _spectrum_stats(positions: np.ndarray, values: np.ndarray) -> Tuple[float, float, float, float]:
-    pos = np.asarray(positions, dtype=np.float64).reshape(-1)
-    vals = np.asarray(values, dtype=np.float64).reshape(-1)
-    total = float(vals.sum())
-    if total <= 0.0 or pos.size == 0:
-        mean = float(pos.mean()) if pos.size else 0.0
-        variance = 0.0
-    else:
-        mean = float((pos * vals).sum() / total)
-        variance = float(((pos - mean) ** 2 * vals).sum() / max(total, 1e-12))
-    stddev = float(np.sqrt(max(variance, 0.0)))
-    return total, mean, variance, stddev
-
-
-@app.route("/roi_cuts_save/<rid>")
-def roi_cuts_save(rid: str):
-    base_param = (request.args.get("base", "") or "").strip()
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    fallback = f"{rid}_cuts_{timestamp}"
-    base = _sanitize_filename(base_param, fallback)
-
+def _build_roi_cuts_report(rid: str) -> Tuple[Optional[Dict[str, object]], Optional[str], int]:
     entry = beam_manager.get(rid)
+    if not entry:
+        return None, "ROI data unavailable", 404
     result = entry.get("result") if entry else None
     if not isinstance(result, dict):
-        return jsonify({"error": "No analysis result for ROI"}), 404
+        return None, "No analysis result for ROI", 404
 
     spectrum_x = result.get("Ix_spectrum")
     spectrum_y = result.get("Iy_spectrum")
     if not spectrum_x or not spectrum_y:
-        return jsonify({"error": "Spectra unavailable"}), 404
+        return None, "Spectra unavailable", 404
 
     x_positions, Ix_vals = spectrum_x
     y_positions, Iy_vals = spectrum_y
@@ -1103,14 +1135,14 @@ def roi_cuts_save(rid: str):
     Ix_vals = np.asarray(Ix_vals, dtype=np.float64)
     Iy_vals = np.asarray(Iy_vals, dtype=np.float64)
     if x_positions.size == 0 or y_positions.size == 0:
-        return jsonify({"error": "Empty spectra"}), 404
+        return None, "Empty spectra", 404
 
     cuts_img = _compose_roi_cuts_image(rid)
     if cuts_img is None:
-        return jsonify({"error": "Cuts image unavailable"}), 404
+        return None, "Cuts image unavailable", 404
     png_bytes = _encode_png(cuts_img)
     if not png_bytes:
-        return jsonify({"error": "Failed to encode cuts image"}), 500
+        return None, "Failed to encode cuts image", 500
 
     total_x, mean_x, var_x, std_x = _spectrum_stats(x_positions, Ix_vals)
     total_y, mean_y, var_y, std_y = _spectrum_stats(y_positions, Iy_vals)
@@ -1186,45 +1218,191 @@ def roi_cuts_save(rid: str):
 
     analysis_text = "\n".join(analysis_lines) + "\n"
 
+    tsv_lines = [f"# {line}" if line else "#" for line in analysis_lines]
+    tsv_lines.append("")
+    tsv_lines.append("axis\tposition_px\tvalue")
+    for pos, val in zip(x_positions, Ix_vals):
+        tsv_lines.append(f"x\t{pos:.9g}\t{val:.9g}")
+    for pos, val in zip(y_positions, Iy_vals):
+        tsv_lines.append(f"y\t{pos:.9g}\t{val:.9g}")
+    ascii_text = "\n".join(tsv_lines) + "\n"
+
+    report = {
+        "entry": entry,
+        "result": result,
+        "cuts_image": cuts_img,
+        "png_bytes": png_bytes,
+        "spectra_csv": spectra_bytes,
+        "analysis_text": analysis_text.encode("utf-8"),
+        "spectra_tsv": ascii_text.encode("utf-8"),
+        "analysis_lines": analysis_lines,
+    }
+    return report, None, 200
+
+
+def _format_physical(value: float, pixel_size: Optional[float]) -> str:
+    if pixel_size is None:
+        return ""
+    return f" ({value * pixel_size:.6g} units)"
+
+
+def _spectrum_stats(positions: np.ndarray, values: np.ndarray) -> Tuple[float, float, float, float]:
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1)
+    vals = np.asarray(values, dtype=np.float64).reshape(-1)
+    total = float(vals.sum())
+    if total <= 0.0 or pos.size == 0:
+        mean = float(pos.mean()) if pos.size else 0.0
+        variance = 0.0
+    else:
+        mean = float((pos * vals).sum() / total)
+        variance = float(((pos - mean) ** 2 * vals).sum() / max(total, 1e-12))
+    stddev = float(np.sqrt(max(variance, 0.0)))
+    return total, mean, variance, stddev
+
+
+@app.route("/roi_cuts_save/<rid>")
+def roi_cuts_save(rid: str):
+    base_param = (request.args.get("base", "") or "").strip()
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    fallback = f"{rid}_cuts_{timestamp}"
+    base = _sanitize_filename(base_param, fallback)
+
+    report, error, status = _build_roi_cuts_report(rid)
+    if report is None:
+        return jsonify({"error": error}), status
+
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{base}_cuts.png", png_bytes)
-        zf.writestr(f"{base}_spectra.csv", spectra_bytes)
-        zf.writestr(f"{base}_analysis.txt", analysis_text.encode('utf-8'))
+        zf.writestr(f"{base}_cuts.png", report["png_bytes"])
+        zf.writestr(f"{base}_spectra.csv", report["spectra_csv"])
+        zf.writestr(f"{base}_analysis.txt", report["analysis_text"])
+        zf.writestr(f"{base}_spectra.tsv", report["spectra_tsv"])
     mem.seek(0)
     return send_file(mem, mimetype="application/zip", as_attachment=True, download_name=f"{base}.zip")
 
 # Save bundle (JSON + PNG inside a ZIP)
 @app.route("/save_bundle")
 def save_bundle():
-    base = request.args.get("base", "").strip()
-    if not base:
-        return jsonify({"error": "Missing base"}), 400
-    bgr = cam_service.get_latest_bgr()
-    size = cam_service.get_frame_size()
-    exp = cam_service.get_exposure_us()
-    cm = cam_service.get_colormap()
-    snap = metrics.get_snapshot()
-    rois = roi_registry.list_dicts()
-    payload: Dict = {
-        "timestamp_iso": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "camera_id": cam_service.get_camera_id(),
-        "frame_size": {"width": size[0], "height": size[1]} if size else {"width": 0, "height": 0},
-        "exposure_us": int(exp),
-        "colormap": cm,
-        "fps": float(snap.get("fps", 0.0)),
-        "rois": rois,
-    }
-    json_bytes = json.dumps(payload, indent=2).encode("utf-8")
-    if bgr is None:
-        png_bytes = _encode_png(_placeholder("No frame", (640, 480)))
+    base_param = (request.args.get("base", "") or "").strip()
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    fallback = f"snapshot_{timestamp}"
+    base = _sanitize_filename(base_param, fallback)
+
+    raw_gray = cam_service.get_latest_gray(raw=True)
+    processed_gray = cam_service.get_latest_gray()
+    background_frame = cam_service.get_background_frame()
+    background_enabled = cam_service.is_background_subtraction_enabled()
+
+    colormap = cam_service.get_colormap()
+
+    live_bgr = cam_service.get_latest_bgr()
+    if live_bgr is None:
+        live_png = _encode_png(_placeholder("No frame", (640, 480)))
+        live_colored = None
     else:
-        png_bytes = _encode_png(bgr)
+        live_colored = apply_colormap_to_bgr(live_bgr, colormap)
+        live_png = _encode_png(live_colored)
+
+    raw_gray_bmp = _encode_gray_bmp(raw_gray)
+    background_bmp = _encode_gray_bmp(background_frame)
+
+    frame_size = cam_service.get_frame_size()
+    exposure_us = cam_service.get_exposure_us()
+    camera_id = cam_service.get_camera_id()
+    cam_running = cam_service.is_running()
+
+    metrics_snapshot = metrics.get_snapshot()
+    beam_options = _get_beam_options_copy()
+    rois = roi_registry.list()
+    rois_dicts = [roi.to_dict() for roi in rois]
+
+    snapshot_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    settings_payload: Dict[str, object] = {
+        "snapshot": {
+            "name": base,
+            "timestamp_iso": snapshot_iso,
+        },
+        "camera": {
+            "id": camera_id,
+            "running": cam_running,
+            "frame_size": {"width": frame_size[0], "height": frame_size[1]} if frame_size else None,
+            "exposure_us": int(exposure_us),
+            "colormap": colormap,
+        },
+        "background_subtraction": {
+            "enabled": background_enabled,
+            "frame_present": background_frame is not None,
+        },
+        "beam_analysis": beam_options,
+        "metrics": metrics_snapshot,
+        "rois": rois_dicts,
+    }
+
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{base}.json", json_bytes)
-        if png_bytes:
-            zf.writestr(f"{base}.png", png_bytes)
+        # Settings and configuration
+        settings_bytes = json.dumps(settings_payload, indent=2, default=_json_default).encode("utf-8")
+        zf.writestr("settings/settings.json", settings_bytes)
+
+        # Camera-level imagery
+        if raw_gray_bmp:
+            zf.writestr("images/raw/latest_raw_gray.bmp", raw_gray_bmp)
+        if raw_gray is not None:
+            _zip_write_npy(zf, "images/raw/latest_raw_gray.npy", np.asarray(raw_gray))
+
+        if background_bmp:
+            zf.writestr("images/raw/averaged_background.bmp", background_bmp)
+        if background_frame is not None:
+            _zip_write_npy(zf, "images/raw/averaged_background.npy", np.asarray(background_frame))
+
+        if live_png:
+            zf.writestr("images/live_view.png", live_png)
+        if live_colored is not None:
+            _zip_write_npy(zf, "images/live_view_colored.npy", np.asarray(live_colored))
+
+        # ROI assets
+        for roi in rois:
+            rid = roi.id
+            roi_entry = beam_manager.get(rid)
+            safe_rid = _safe_roi_fs_name(rid)
+            roi_dir = f"rois/{safe_rid}"
+
+            roi_meta = roi.to_dict()
+            roi_meta.update({
+                "frame_timestamp": roi_entry.get("frame_ts") if roi_entry else None,
+                "analysis_available": bool(roi_entry and roi_entry.get("result")),
+                "pixel_size": roi_entry.get("pixel_size") if roi_entry else None,
+            })
+            zf.writestr(f"{roi_dir}/{safe_rid}_meta.json", json.dumps(roi_meta, indent=2, default=_json_default).encode("utf-8"))
+
+            roi_gray = _get_roi_gray_image(rid, entry=roi_entry)
+            if roi_gray is not None and getattr(roi_gray, "size", 0) > 0:
+                roi_gray_bmp = _encode_gray_bmp(roi_gray)
+                if roi_gray_bmp:
+                    zf.writestr(f"{roi_dir}/{safe_rid}_gray.bmp", roi_gray_bmp)
+                _zip_write_npy(zf, f"{roi_dir}/{safe_rid}_gray.npy", np.asarray(roi_gray))
+
+            overlay = _compose_roi_profile_image(rid)
+            if overlay is None and roi_gray is not None and getattr(roi_gray, "size", 0) > 0:
+                arr = np.asarray(roi_gray, dtype=np.float32)
+                peak = float(np.max(arr)) if arr.size else 1.0
+                if peak <= 0.0:
+                    peak = 1.0
+                roi_u8 = _normalize_to_u8(arr, peak)
+                overlay = apply_colormap_to_gray(roi_u8, colormap)
+            if overlay is not None:
+                overlay_png = _encode_png(overlay)
+                if overlay_png:
+                    zf.writestr(f"{roi_dir}/{safe_rid}_profile.png", overlay_png)
+
+            report, _, _ = _build_roi_cuts_report(rid)
+            if report:
+                zf.writestr(f"{roi_dir}/{safe_rid}_cuts.png", report["png_bytes"])
+                zf.writestr(f"{roi_dir}/{safe_rid}_cuts.tsv", report["spectra_tsv"])
+                zf.writestr(f"{roi_dir}/{safe_rid}_cuts.csv", report["spectra_csv"])
+                zf.writestr(f"{roi_dir}/{safe_rid}_cuts_analysis.txt", report["analysis_text"])
+
     mem.seek(0)
     return send_file(mem, mimetype="application/zip", as_attachment=True, download_name=f"{base}.zip")
 

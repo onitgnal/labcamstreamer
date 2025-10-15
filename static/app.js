@@ -9,7 +9,7 @@
 
   const cameraToggle = qs('#cameraToggle');
   const cameraSelect = qs('#cameraSelect');
-  const saveBtn = qs('#saveBtn');
+  const saveAllBtn = qs('#saveAllBtn');
   const backgroundSubtractionToggle = qs('#backgroundSubtractionToggle');
   const backgroundSubtractionModal = qs('#backgroundSubtractionModal');
   const closeModalButton = backgroundSubtractionModal.querySelector('.close-button');
@@ -751,15 +751,16 @@
     }
   });
 
-  saveBtn.addEventListener('click', async () => {
-    const iso = new Date().toISOString().replace(/[:]/g, '-').replace(/\..+/, '');
-    const def = `snapshot_${iso}`;
-    const base = window.prompt('Save as…', def);
-    if (!base) return;
-    try {
-      const res = await fetch(`/save_bundle?base=${encodeURIComponent(base)}`);
-      if (!res.ok) throw new Error('Save failed');
-      const blob = await res.blob();
+  if (saveAllBtn) {
+    saveAllBtn.addEventListener('click', async () => {
+      const iso = new Date().toISOString().replace(/[:]/g, '-').replace(/\..+/, '');
+      const def = `snapshot_${iso}`;
+      const base = window.prompt('Save as...', def);
+      if (!base) return;
+      try {
+        const res = await fetch(`/save_bundle?base=${encodeURIComponent(base)}`);
+        if (!res.ok) throw new Error('Save failed');
+        const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -770,8 +771,9 @@
       URL.revokeObjectURL(url);
     } catch (e) {
       console.warn(e);
-    }
-  });
+      }
+    });
+  }
 
   // ----- Image events -----
   stream.addEventListener('load', () => {
@@ -814,6 +816,15 @@
       logToServer('info', 'Background subtraction enabled', { num_frames: numFrames });
     } catch (e) {
       logToServer('error', 'Failed to enable background subtraction', { error: e.toString() });
+      let message = e && e.message ? e.message : 'Unknown error';
+      try {
+        const parsed = JSON.parse(message);
+        if (parsed && typeof parsed.error === 'string') {
+          message = parsed.error;
+        }
+      } catch (_) {}
+      alert(`Background subtraction failed: ${message}`);
+      backgroundSubtractionModal.hidden = false;
       backgroundSubtractionToggle.checked = false;
     }
   });

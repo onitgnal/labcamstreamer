@@ -116,29 +116,26 @@ class CameraService:
                     else:
                         display = frame.convert_pixel_format(OPENCV_DISPLAY_FORMAT)
 
-                    # NumPy BGR image
+                    # NumPy BGR image and raw grayscale
                     bgr_input = display.as_opencv_image()
-
-                    final_bgr = None
-                    final_gray = None
+                    gray_raw = cv2.cvtColor(bgr_input, cv2.COLOR_BGR2GRAY)
 
                     with self.service._frame_lock:
                         bg_sub_enabled = self.service._background_subtraction_enabled
                         bg_frame = self.service._background_frame
 
                     if bg_sub_enabled and bg_frame is not None:
-                        gray_input = cv2.cvtColor(bgr_input, cv2.COLOR_BGR2GRAY)
-                        gray_float = gray_input.astype(np.float32)
+                        gray_float = gray_raw.astype(np.float32)
                         subtracted_gray_float = gray_float - bg_frame
-
                         final_gray = np.clip(subtracted_gray_float, 0, 255).astype(np.uint8)
                         final_bgr = cv2.cvtColor(final_gray, cv2.COLOR_GRAY2BGR)
                     else:
+                        final_gray = gray_raw
                         final_bgr = bgr_input
-                        final_gray = cv2.cvtColor(bgr_input, cv2.COLOR_BGR2GRAY)
 
                     # Update latest frames (copy to decouple from buffer reuse)
                     with self.service._frame_lock:
+                        self.service._latest_gray_raw = gray_raw.copy()
                         self.service._latest_bgr = final_bgr.copy()
                         self.service._latest_gray = final_gray.copy()
 
@@ -178,6 +175,7 @@ class CameraService:
 
         self._latest_bgr: Optional[np.ndarray] = None
         self._latest_gray: Optional[np.ndarray] = None
+        self._latest_gray_raw: Optional[np.ndarray] = None
         self._colormap: str = "jet"
         self._background_frame: Optional[np.ndarray] = None
         self._background_subtraction_enabled = False
@@ -263,6 +261,10 @@ class CameraService:
         if not self._running:
             return
         self._logger.info(f"Stopping camera: {self.get_camera_id()}")
+        with self._frame_lock:
+            background_active = self._background_subtraction_enabled or self._background_frame is not None
+        if background_active:
+            self.stop_background_subtraction()
         try:
             if self._cam:
                 self._cam.stop_streaming()
@@ -420,29 +422,20 @@ class CameraService:
         if not self._cam:
             raise RuntimeError("Camera not running")
 
-        frames = []
-        if isinstance(self._cam, FakeCamera):
-            for _ in range(num_frames):
-                frame_data_16bit = self._cam.generate_background_frame()
-                frame_data_8bit = (frame_data_16bit >> 8).astype(np.uint8)
-                frames.append(frame_data_8bit)
-        else:
-            # For real cameras, get from the display queue.
-            # This relies on the user blocking the beam.
-            collected_frames = 0
-            start_time = time.time()
-            # 5 second timeout to collect frames
-            while collected_frames < num_frames and (time.time() - start_time) < 5.0:
-                try:
-                    bgr = self._display_queue.get(timeout=0.1)
-                    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-                    frames.append(gray)
-                    collected_frames += 1
-                except Exception:
-                    pass # Keep trying until timeout
+        frames: List[np.ndarray] = []
+        while len(frames) < num_frames:
+            if not self._running:
+                raise RuntimeError("Camera not running")
+            got_signal = self.wait_for_frame_signal(timeout=0.2)
+            if not got_signal:
+                continue
+            latest_gray = self.get_latest_gray(raw=True)
+            if latest_gray is None:
+                continue
+            frames.append(latest_gray)
 
         if not frames:
-            raise RuntimeError(f"Could not capture any background frames within the time limit.")
+            raise RuntimeError("Could not capture any background frames.")
 
         # Average the collected frames. Convert to float for calculation.
         avg_frame_float = np.mean([f.astype(np.float32) for f in frames], axis=0)
@@ -467,11 +460,22 @@ class CameraService:
                 return None
             return self._latest_bgr.copy()
 
-    def get_latest_gray(self) -> Optional[np.ndarray]:
+    def get_latest_gray(self, *, raw: bool = False) -> Optional[np.ndarray]:
         with self._frame_lock:
-            if self._latest_gray is None:
+            src = self._latest_gray_raw if raw else self._latest_gray
+            if src is None:
                 return None
-            return self._latest_gray.copy()
+            return src.copy()
+
+    def get_background_frame(self) -> Optional[np.ndarray]:
+        with self._frame_lock:
+            if self._background_frame is None:
+                return None
+            return self._background_frame.copy()
+
+    def is_background_subtraction_enabled(self) -> bool:
+        with self._frame_lock:
+            return self._background_subtraction_enabled
 
     def get_frame_size(self) -> Optional[Tuple[int, int]]:
         with self._frame_lock:
