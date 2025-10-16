@@ -657,8 +657,8 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
         gauss_rx_disp = gauss_rx * (pixel_size_val or 1.0)
         gauss_ry_disp = gauss_ry * (pixel_size_val or 1.0)
 
-        title_x = f"Ix | ISO:{rx_iso_disp:.2f} | G:{gauss_rx_disp:.2f}{unit_suffix}"
-        title_y = f"Iy | ISO:{ry_iso_disp:.2f} | G:{gauss_ry_disp:.2f}{unit_suffix}"
+        title_x = f"Ix | ISO:{rx_iso_disp:.1e} | G:{gauss_rx_disp:.1e}{unit_suffix}"
+        title_y = f"Iy | ISO:{ry_iso_disp:.1e} | G:{gauss_ry_disp:.1e}{unit_suffix}"
 
         canvas = np.full((240, 480, 3), _PLOT_BG, dtype=np.uint8)
         with _plot_lock:
