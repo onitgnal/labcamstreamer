@@ -39,6 +39,29 @@
 
   const roiList = qs('#roiList');
 
+  // Caustic controls
+  const causticPanel = qs('#causticPanel');
+  const causticCollapseBtn = qs('#causticCollapseBtn');
+  const causticWavelength = qs('#causticWavelength');
+  const causticUnit = qs('#causticUnit');
+  const causticSource = qs('#causticSource');
+  const causticFitBtn = qs('#causticFitBtn');
+  const causticSaveBtn = qs('#causticSaveBtn');
+  const causticPointList = qs('#causticPointList');
+  const causticImagesSection = qs('#causticImagesSection');
+  const causticImagesGrid = qs('#causticImagesGrid');
+  const causticPlotSection = qs('#causticPlotSection');
+  const causticPlotCanvas = qs('#causticPlotCanvas');
+  const causticPlotEmpty = qs('#causticPlotEmpty');
+  const causticFitSummary = qs('#causticFitSummary');
+  const causticModal = qs('#causticAddModal');
+  const causticModalClose = qs('#causticModalClose');
+  const causticModalCancel = qs('#causticModalCancel');
+  const causticModalAdd = qs('#causticModalAdd');
+  const causticModalZ = qs('#causticModalZ');
+  const causticModalRoi = qs('#causticModalRoi');
+  const causticModalUnit = qs('#causticModalUnit');
+
   // ----- State -----
   const state = {
     rois: [],                 // [{id,x,y,w,h}, ...] in stream pixel coords
@@ -51,10 +74,24 @@
     drag: null,               // {mode:'move'|'resize'|'create', roiId, start:{x,y}, orig:{x,y,w,h}, handle:null}
     preview: null,            // temp preview rect for create
     // Debounce timers
-    putTimer: null
+    putTimer: null,
+    caustic: {
+      config: {
+        wavelength_nm: 1030,
+        position_unit: 'mm',
+        radii_source: 'gauss_1e2',
+      },
+      points: [],
+      series: { z: [], wx: [], wy: [] },
+      fits: {},
+      selectedPointId: null,
+      collapsed: false,
+      pendingRoiId: null,
+    },
   };
 
   const roiImageTimers = new Map(); // Map<roiId, { profile:number, cuts:number }>
+  let causticConfigTimer = null;
 
   // ----- REST helpers -----
   async function logToServer(level, message, data) {
@@ -133,6 +170,721 @@
     }
   }
 
+
+  // ----- Caustic helpers -----
+  const CAUSTIC_SOURCE_LABELS = {
+    gauss_1e2: 'Gaussian 1/e² radii (x, y)',
+    moment_2sigma: '2σ second-moment radii (x, y)',
+  };
+
+  const LENGTH_UNIT_FACTORS = {
+    m: 1,
+    meter: 1,
+    meters: 1,
+    mm: 1e-3,
+    millimeter: 1e-3,
+    millimeters: 1e-3,
+    cm: 1e-2,
+    centimeter: 1e-2,
+    centimeters: 1e-2,
+    um: 1e-6,
+    micrometer: 1e-6,
+    micrometers: 1e-6,
+    in: 0.0254,
+    inch: 0.0254,
+    inches: 0.0254,
+    ft: 0.3048,
+    foot: 0.3048,
+    feet: 0.3048,
+  };
+
+  function formatNumber(value, digits = 3) {
+    if (!Number.isFinite(value)) return '—';
+    if (Math.abs(value) >= 1000 || Math.abs(value) < 1e-2) {
+      return value.toExponential(digits - 1);
+    }
+    return value.toFixed(digits);
+  }
+
+  function getCausticSourceLabel(key) {
+    return CAUSTIC_SOURCE_LABELS[key] || key;
+  }
+
+  function convertMetersToUnit(value, unit) {
+    if (!Number.isFinite(value)) return null;
+    const factor = LENGTH_UNIT_FACTORS[(unit || '').toLowerCase()];
+    if (!factor) return null;
+    return value / factor;
+  }
+
+  function getUniformPixelSize(points) {
+    const values = (points || [])
+      .map((p) => Number(p.pixel_size_m))
+      .filter((v) => Number.isFinite(v) && v > 0);
+    if (!values.length) return null;
+    const sum = values.reduce((acc, v) => acc + v, 0);
+    return sum / values.length;
+  }
+
+  function parseServerError(error) {
+    if (!error) return 'Unknown error';
+    if (typeof error === 'string') {
+      try {
+        const parsed = JSON.parse(error);
+        if (parsed && typeof parsed.error === 'string') {
+          return parsed.error;
+        }
+      } catch (_) {}
+      return error;
+    }
+    if (error instanceof Error) {
+      const message = error.message || '';
+      if (message) {
+        try {
+          const parsed = JSON.parse(message);
+          if (parsed && typeof parsed.error === 'string') {
+            return parsed.error;
+          }
+        } catch (_) {}
+        return message;
+      }
+    }
+    if (typeof error === 'object' && error.error) {
+      return String(error.error);
+    }
+    return String(error);
+  }
+
+  function applyCausticState(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    const prevSelected = state.caustic.selectedPointId;
+
+    if (payload.config) {
+      state.caustic.config = {
+        ...state.caustic.config,
+        ...payload.config,
+      };
+    }
+    if (Array.isArray(payload.points)) {
+      state.caustic.points = payload.points;
+    }
+    if (payload.series) {
+      state.caustic.series = {
+        z: Array.isArray(payload.series.z) ? payload.series.z : [],
+        wx: Array.isArray(payload.series.wx) ? payload.series.wx : [],
+        wy: Array.isArray(payload.series.wy) ? payload.series.wy : [],
+      };
+    }
+    if (payload.fits) {
+      state.caustic.fits = payload.fits;
+    }
+
+    let selected = prevSelected;
+    if (payload.last_added_point_id) {
+      selected = payload.last_added_point_id;
+    } else if (selected && !state.caustic.points.some((pt) => pt.id === selected)) {
+      selected = null;
+    }
+    if (!selected && state.caustic.points.length) {
+      selected = state.caustic.points[state.caustic.points.length - 1].id;
+    }
+    state.caustic.selectedPointId = selected || null;
+
+    updateCausticUi();
+  }
+
+  function updateCausticUi() {
+    renderCausticControls();
+    renderCausticPointList();
+    renderCausticImages();
+    renderCausticPlot();
+    renderCausticFitSummary();
+  }
+
+  function renderCausticControls() {
+    if (!causticPanel) return;
+    const config = state.caustic.config || {};
+
+    if (causticWavelength) {
+      const next = config.wavelength_nm != null ? String(config.wavelength_nm) : '';
+      if (causticWavelength.value !== next) causticWavelength.value = next;
+    }
+    if (causticUnit) {
+      const next = config.position_unit || 'mm';
+      if (causticUnit.value !== next) causticUnit.value = next;
+      if (causticModalUnit) causticModalUnit.textContent = next;
+    }
+    if (causticSource) {
+      const next = config.radii_source || 'gauss_1e2';
+      if (causticSource.value !== next) causticSource.value = next;
+    }
+
+    causticPanel.classList.toggle('collapsed', !!state.caustic.collapsed);
+    if (causticCollapseBtn) {
+      causticCollapseBtn.textContent = state.caustic.collapsed ? '+' : '−';
+    }
+
+    const points = state.caustic.points || [];
+    const hasEnoughPoints = points.length >= 3;
+    const pixelSize = getUniformPixelSize(points);
+
+    if (causticFitBtn) {
+      causticFitBtn.disabled = !hasEnoughPoints;
+      if (!hasEnoughPoints) {
+        causticFitBtn.title = 'Collect at least three points to run the M² fit.';
+      } else if (!pixelSize) {
+        causticFitBtn.title = 'Set the pixel size in Beam Analysis before running the M² fit.';
+      } else {
+        causticFitBtn.title = '';
+      }
+    }
+
+    if (causticSaveBtn) {
+      const hasPoints = points.length > 0;
+      causticSaveBtn.disabled = !hasPoints;
+      causticSaveBtn.title = hasPoints ? '' : 'Add caustic points before saving.';
+    }
+  }
+
+  function renderCausticPointList() {
+    if (!causticPointList) return;
+    causticPointList.innerHTML = '';
+    const points = state.caustic.points || [];
+    const sourceKey = state.caustic.config?.radii_source || 'gauss_1e2';
+    const unitLabel = state.caustic.config?.position_unit || 'mm';
+
+    if (!points.length) {
+      const empty = document.createElement('div');
+      empty.className = 'caustic-point-empty';
+      empty.textContent = 'No caustic points collected yet.';
+      causticPointList.appendChild(empty);
+      return;
+    }
+
+    for (const point of points) {
+      const row = document.createElement('div');
+      row.className = 'caustic-point-row';
+      row.dataset.pointId = point.id;
+      if (point.id === state.caustic.selectedPointId) row.classList.add('selected');
+
+      const radii = point.radii && point.radii[sourceKey] ? point.radii[sourceKey] : {};
+
+      const roi = document.createElement('span');
+      roi.className = 'label roi';
+      roi.textContent = point.roi_id || 'ROI';
+
+      const z = document.createElement('span');
+      z.className = 'z';
+      const zDisplay = Number(point.z_display);
+      const numericZ = Number.isFinite(zDisplay) ? zDisplay : Number(point.z_m);
+      z.textContent = `${formatNumber(numericZ, 3)} ${unitLabel}`;
+
+      const wxSpan = document.createElement('span');
+      wxSpan.className = 'wx';
+      wxSpan.textContent = formatNumber(radii.wx);
+
+      const wySpan = document.createElement('span');
+      wySpan.className = 'wy';
+      wySpan.textContent = formatNumber(radii.wy);
+
+      const source = document.createElement('span');
+      source.className = 'src';
+      source.textContent = getCausticSourceLabel(sourceKey);
+
+      const removeCell = document.createElement('span');
+      removeCell.className = 'remove';
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = '×';
+      removeBtn.title = 'Remove point';
+      removeBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        removeCausticPoint(point.id);
+      });
+      removeCell.appendChild(removeBtn);
+
+      row.appendChild(roi);
+      row.appendChild(z);
+      row.appendChild(wxSpan);
+      row.appendChild(wySpan);
+      row.appendChild(source);
+      row.appendChild(removeCell);
+
+      row.addEventListener('click', () => selectCausticPoint(point.id));
+      causticPointList.appendChild(row);
+    }
+  }
+
+  function renderCausticImages() {
+    if (!causticImagesSection || !causticImagesGrid) return;
+    const points = state.caustic.points || [];
+    const selectedId = state.caustic.selectedPointId;
+    const unitLabel = state.caustic.config?.position_unit || 'mm';
+
+    causticImagesSection.hidden = !points.length;
+    causticImagesGrid.innerHTML = '';
+    if (!points.length) return;
+
+    const cacheBust = Date.now();
+    for (const point of points) {
+      const card = document.createElement('div');
+      card.className = 'caustic-card';
+      card.dataset.pointId = point.id;
+      if (point.id === selectedId) card.classList.add('selected');
+
+      const header = document.createElement('div');
+      header.className = 'caustic-card-header';
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const roiLabel = document.createElement('strong');
+      roiLabel.textContent = point.roi_id || 'ROI';
+      const zLine = document.createElement('span');
+      const zDisplay = Number(point.z_display);
+      const numericZ = Number.isFinite(zDisplay) ? zDisplay : Number(point.z_m);
+      zLine.textContent = `z: ${formatNumber(numericZ, 3)} ${unitLabel}`;
+      const sourceLine = document.createElement('span');
+      sourceLine.textContent = getCausticSourceLabel(state.caustic.config?.radii_source || 'gauss_1e2');
+      meta.appendChild(roiLabel);
+      meta.appendChild(zLine);
+      meta.appendChild(sourceLine);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        removeCausticPoint(point.id);
+      });
+
+      header.appendChild(meta);
+      header.appendChild(removeBtn);
+      card.appendChild(header);
+
+      const images = document.createElement('div');
+      images.className = 'caustic-card-images';
+
+      if (point.images?.profile) {
+        const img = document.createElement('img');
+        img.alt = 'Caustic profile';
+        img.src = `${point.images.profile}?t=${cacheBust}`;
+        images.appendChild(img);
+      }
+
+      if (point.images?.cut_x || point.images?.cut_y) {
+        const cutsWrap = document.createElement('div');
+        cutsWrap.className = 'caustic-cut-images';
+        if (point.images.cut_x) {
+          const cutX = document.createElement('img');
+          cutX.alt = 'Cut X';
+          cutX.src = `${point.images.cut_x}?t=${cacheBust}`;
+          cutsWrap.appendChild(cutX);
+        }
+        if (point.images.cut_y) {
+          const cutY = document.createElement('img');
+          cutY.alt = 'Cut Y';
+          cutY.src = `${point.images.cut_y}?t=${cacheBust}`;
+          cutsWrap.appendChild(cutY);
+        }
+        images.appendChild(cutsWrap);
+      }
+
+      card.appendChild(images);
+      card.addEventListener('click', () => selectCausticPoint(point.id));
+      causticImagesGrid.appendChild(card);
+    }
+  }
+
+  function renderCausticPlot() {
+    if (!causticPlotSection || !causticPlotCanvas || !causticPlotEmpty) return;
+    const points = state.caustic.points || [];
+
+    if (!points.length) {
+      causticPlotSection.hidden = true;
+      return;
+    }
+    causticPlotSection.hidden = false;
+
+    const ctx2d = causticPlotCanvas.getContext('2d');
+    if (!ctx2d) return;
+
+    const series = state.caustic.series || { z: [], wx: [], wy: [] };
+    const pointsForPlot = points.slice().sort((a, b) => Number(a.z_m) - Number(b.z_m));
+
+    let zValues = (series.z || []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    let wxValues = (series.wx || []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    let wyValues = (series.wy || []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    let count = Math.min(zValues.length, wxValues.length, wyValues.length);
+
+    const sourceKey = state.caustic.config?.radii_source || 'gauss_1e2';
+
+    if (!count && points.length) {
+      zValues = [];
+      wxValues = [];
+      wyValues = [];
+      for (const point of pointsForPlot) {
+        const radii = point.radii && point.radii[sourceKey] ? point.radii[sourceKey] : {};
+        const zCandidate = Number(point.z_display);
+        const zValue = Number.isFinite(zCandidate)
+          ? zCandidate
+          : convertMetersToUnit(Number(point.z_m), state.caustic.config?.position_unit || 'mm');
+        const wxCandidate = Number(radii.wx);
+        const wyCandidate = Number(radii.wy);
+        if (!Number.isFinite(zValue) || !Number.isFinite(wxCandidate) || !Number.isFinite(wyCandidate)) continue;
+        zValues.push(zValue);
+        wxValues.push(wxCandidate);
+        wyValues.push(wyCandidate);
+      }
+      count = Math.min(zValues.length, wxValues.length, wyValues.length);
+    }
+
+    if (!count) {
+      causticPlotEmpty.hidden = false;
+      const wrapper = causticPlotCanvas.parentElement;
+      const width = (wrapper?.clientWidth || 640);
+      const height = (wrapper?.clientHeight || 320);
+      const dpr = window.devicePixelRatio || 1;
+      causticPlotCanvas.width = width * dpr;
+      causticPlotCanvas.height = height * dpr;
+      causticPlotCanvas.style.width = `${width}px`;
+      causticPlotCanvas.style.height = `${height}px`;
+      ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx2d.clearRect(0, 0, width, height);
+      return;
+    }
+
+    causticPlotEmpty.hidden = true;
+
+    const wrapper = causticPlotCanvas.parentElement;
+    const width = (wrapper?.clientWidth || 640);
+    const height = (wrapper?.clientHeight || 320);
+    const dpr = window.devicePixelRatio || 1;
+    causticPlotCanvas.width = width * dpr;
+    causticPlotCanvas.height = height * dpr;
+    causticPlotCanvas.style.width = `${width}px`;
+    causticPlotCanvas.style.height = `${height}px`;
+    ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx2d.clearRect(0, 0, width, height);
+
+    const margins = { left: 60, right: 20, top: 20, bottom: 50 };
+    const plotW = Math.max(10, width - margins.left - margins.right);
+    const plotH = Math.max(10, height - margins.top - margins.bottom);
+
+    const zMin = Math.min(...zValues);
+    const zMax = Math.max(...zValues);
+    const zPadding = (zMax - zMin) * 0.1 || 1;
+    const zLower = zMin - zPadding;
+    const zUpper = zMax + zPadding;
+    const zRange = Math.max(1e-9, zUpper - zLower);
+
+    const allW = wxValues.concat(wyValues);
+    const wMinRaw = Math.min(...allW);
+    const wMaxRaw = Math.max(...allW);
+    const wPadding = (wMaxRaw - wMinRaw) * 0.2 || 1;
+    const wLower = Math.max(0, wMinRaw - wPadding);
+    const wUpper = wMaxRaw + wPadding;
+    const wRange = Math.max(1e-9, wUpper - wLower);
+
+    const toX = (z) => margins.left + ((z - zLower) / zRange) * plotW;
+    const toY = (w) => (height - margins.bottom) - ((w - wLower) / wRange) * plotH;
+
+    ctx2d.fillStyle = '#141924';
+    ctx2d.fillRect(margins.left, margins.top, plotW, plotH);
+
+    ctx2d.strokeStyle = '#525860';
+    ctx2d.lineWidth = 1;
+    ctx2d.beginPath();
+    ctx2d.moveTo(margins.left, height - margins.bottom);
+    ctx2d.lineTo(width - margins.right, height - margins.bottom);
+    ctx2d.moveTo(margins.left, height - margins.bottom);
+    ctx2d.lineTo(margins.left, margins.top);
+    ctx2d.stroke();
+
+    ctx2d.fillStyle = '#8b93a7';
+    ctx2d.font = '12px sans-serif';
+    ctx2d.fillText(`z (${state.caustic.config?.position_unit || 'mm'})`, width / 2 - 20, height - 16);
+    ctx2d.save();
+    ctx2d.translate(18, height / 2 + 20);
+    ctx2d.rotate(-Math.PI / 2);
+    ctx2d.fillText('Radius (pixels)', 0, 0);
+    ctx2d.restore();
+
+    const drawSeries = (values, color) => {
+      ctx2d.strokeStyle = color;
+      ctx2d.lineWidth = 2;
+      ctx2d.beginPath();
+      for (let i = 0; i < count; i++) {
+        const x = toX(zValues[i]);
+        const y = toY(values[i]);
+        if (i === 0) ctx2d.moveTo(x, y);
+        else ctx2d.lineTo(x, y);
+      }
+      ctx2d.stroke();
+    };
+
+    drawSeries(wxValues, '#e2904a');
+    drawSeries(wyValues, '#c2e350');
+
+    const selectedId = state.caustic.selectedPointId;
+    const selectedIndex = pointsForPlot.findIndex((pt) => pt.id === selectedId);
+
+    const drawPoints = (values, color) => {
+      for (let i = 0; i < count; i++) {
+        const x = toX(zValues[i]);
+        const y = toY(values[i]);
+        ctx2d.fillStyle = color;
+        ctx2d.beginPath();
+        ctx2d.arc(x, y, 4, 0, Math.PI * 2);
+        ctx2d.fill();
+        if (i === selectedIndex) {
+          ctx2d.strokeStyle = '#50e3c2';
+          ctx2d.lineWidth = 2;
+          ctx2d.beginPath();
+          ctx2d.arc(x, y, 6, 0, Math.PI * 2);
+          ctx2d.stroke();
+        }
+      }
+    };
+
+    drawPoints(wxValues, '#e2904a');
+    drawPoints(wyValues, '#c2e350');
+
+    const pixelSize = getUniformPixelSize(points);
+    const fits = state.caustic.fits || {};
+    const unit = state.caustic.config?.position_unit || 'mm';
+
+    const plotFit = (axisKey, color) => {
+      const fit = fits[axisKey];
+      if (!fit) return;
+      if (!Number.isFinite(fit.w0_m) || !Number.isFinite(fit.z0_m) || !Number.isFinite(fit.zR_prime_m)) return;
+      if (!pixelSize || pixelSize <= 0) return;
+      const zMeters = pointsForPlot.map((pt) => Number(pt.z_m)).filter((v) => Number.isFinite(v));
+      if (!zMeters.length) return;
+      const minM = Math.min(...zMeters);
+      const maxM = Math.max(...zMeters);
+      const span = Math.max(1e-9, maxM - minM);
+      const start = minM - span * 0.1;
+      const end = maxM + span * 0.1;
+      const samples = [];
+      const steps = 80;
+      for (let i = 0; i < steps; i++) {
+        const z = start + (end - start) * (i / (steps - 1));
+        const term = (z - fit.z0_m) / fit.zR_prime_m;
+        const w = Math.sqrt(Math.max(0, fit.w0_m * fit.w0_m * (1 + term * term)));
+        const zDisplay = convertMetersToUnit(z, unit);
+        const wDisplay = w / pixelSize;
+        if (!Number.isFinite(zDisplay) || !Number.isFinite(wDisplay)) continue;
+        samples.push({ z: zDisplay, w: wDisplay });
+      }
+      if (!samples.length) return;
+
+      ctx2d.strokeStyle = color;
+      ctx2d.lineWidth = 1.5;
+      ctx2d.setLineDash([6, 4]);
+      ctx2d.beginPath();
+      samples.forEach((sample, idx) => {
+        const x = toX(sample.z);
+        const y = toY(sample.w);
+        if (idx === 0) ctx2d.moveTo(x, y);
+        else ctx2d.lineTo(x, y);
+      });
+      ctx2d.stroke();
+      ctx2d.setLineDash([]);
+    };
+
+    plotFit('x', '#e2904a');
+    plotFit('y', '#c2e350');
+  }
+
+  function renderCausticFitSummary() {
+    if (!causticFitSummary) return;
+    causticFitSummary.innerHTML = '';
+    const fits = state.caustic.fits || {};
+    const unit = state.caustic.config?.position_unit || 'mm';
+
+    const entries = [];
+    for (const axis of ['x', 'y']) {
+      const fit = fits[axis];
+      if (!fit || !Number.isFinite(fit.w0_m) || !Number.isFinite(fit.M2)) continue;
+      const sigma = fit.sigma || {};
+      const w0Um = convertMetersToUnit(fit.w0_m, 'um');
+      const w0SigmaUm = convertMetersToUnit(sigma.w0_m, 'um');
+      const z0Val = convertMetersToUnit(fit.z0_m, unit);
+      const z0Sigma = convertMetersToUnit(sigma.z0_m, unit);
+      const zRVal = convertMetersToUnit(fit.zR_prime_m, unit);
+      const zRSigma = convertMetersToUnit(sigma.zR_prime_m, unit);
+
+      const axisDiv = document.createElement('div');
+      axisDiv.className = 'axis';
+      const heading = document.createElement('strong');
+      heading.textContent = axis === 'x' ? 'Axis X' : 'Axis Y';
+      axisDiv.appendChild(heading);
+
+      const row = (label, value, sigmaValue, suffix) => {
+        const line = document.createElement('span');
+        const valueStr = formatNumber(value);
+        const sigmaStr = sigmaValue != null ? formatNumber(sigmaValue) : null;
+        line.textContent = sigmaStr
+          ? `${label}: ${valueStr}${suffix} ± ${sigmaStr}${suffix}`
+          : `${label}: ${valueStr}${suffix}`;
+        axisDiv.appendChild(line);
+      };
+
+      row('w0', w0Um, w0SigmaUm, ' µm');
+      row('z0', z0Val, z0Sigma, ` ${unit}`);
+      row(`zR'`, zRVal, zRSigma, ` ${unit}`);
+      const mLine = document.createElement('span');
+      const mSigma = sigma.M2 != null ? formatNumber(sigma.M2) : null;
+      mLine.textContent = mSigma ? `M²: ${formatNumber(fit.M2)} ± ${mSigma}` : `M²: ${formatNumber(fit.M2)}`;
+      axisDiv.appendChild(mLine);
+      entries.push(axisDiv);
+    }
+
+    if (!entries.length) {
+      const note = document.createElement('span');
+      note.className = 'caustic-point-empty';
+      note.textContent = 'Run M² fit to populate results.';
+      causticFitSummary.appendChild(note);
+    } else {
+      for (const entry of entries) {
+        causticFitSummary.appendChild(entry);
+      }
+    }
+  }
+
+  function selectCausticPoint(pointId) {
+    state.caustic.selectedPointId = pointId;
+    renderCausticPointList();
+    renderCausticImages();
+    renderCausticPlot();
+  }
+
+  function openCausticModal(roiId) {
+    state.caustic.pendingRoiId = roiId;
+    if (causticModalRoi) causticModalRoi.textContent = roiId;
+    if (causticModalZ) {
+      causticModalZ.value = '';
+      setTimeout(() => causticModalZ.focus(), 20);
+    }
+    if (causticModal) causticModal.hidden = false;
+  }
+
+  function closeCausticModal() {
+    state.caustic.pendingRoiId = null;
+    if (causticModal) causticModal.hidden = true;
+  }
+
+  function scheduleCausticConfigUpdate() {
+    if (causticConfigTimer) clearTimeout(causticConfigTimer);
+    causticConfigTimer = setTimeout(() => {
+      const payload = {};
+      if (causticWavelength) {
+        const val = Number(causticWavelength.value);
+        if (Number.isFinite(val) && val > 0) payload.wavelength_nm = val;
+      }
+      if (causticUnit) {
+        const unitVal = causticUnit.value.trim();
+        if (unitVal) payload.position_unit = unitVal;
+      }
+      if (causticSource) {
+        payload.radii_source = causticSource.value;
+      }
+      updateCausticConfig(payload);
+    }, 200);
+  }
+
+  async function updateCausticConfig(changes) {
+    try {
+      const res = await postJSON('/caustic/config', changes);
+      applyCausticState(res);
+    } catch (error) {
+      alert(`Failed to update caustic settings: ${parseServerError(error)}`);
+    }
+  }
+
+  async function refreshCausticState() {
+    try {
+      const data = await getJSON('/caustic/state');
+      applyCausticState(data);
+    } catch (error) {
+      console.warn('Failed to load caustic state', error);
+    }
+  }
+
+  async function submitCausticPoint() {
+    const roiId = state.caustic.pendingRoiId;
+    if (!roiId) {
+      closeCausticModal();
+      return;
+    }
+    const zValue = Number(causticModalZ?.value);
+    if (!Number.isFinite(zValue)) {
+      alert('Enter a valid z-position.');
+      return;
+    }
+    try {
+      const res = await postJSON('/caustic/add', { roi_id: roiId, z: zValue });
+      applyCausticState(res);
+      closeCausticModal();
+      logToServer('info', 'Caustic point added', { roi: roiId, z: zValue });
+    } catch (error) {
+      alert(`Failed to add caustic point: ${parseServerError(error)}`);
+    }
+  }
+
+  async function removeCausticPoint(pointId) {
+    try {
+      const res = await fetch(`/caustic/${encodeURIComponent(pointId)}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      applyCausticState(data);
+    } catch (error) {
+      alert(`Failed to remove point: ${parseServerError(error)}`);
+    }
+  }
+
+  async function requestCausticFit() {
+    const points = state.caustic.points || [];
+    if (points.length < 3) {
+      alert('Collect at least three caustic points before running the M² fit.');
+      return;
+    }
+    if (!getUniformPixelSize(points)) {
+      alert('Set the pixel size in the Beam Analysis panel before running the M² fit.');
+      return;
+    }
+    try {
+      const res = await postJSON('/caustic/fit', {});
+      applyCausticState(res);
+    } catch (error) {
+      alert(`M² fit failed: ${parseServerError(error)}`);
+    }
+  }
+
+  async function requestCausticSave() {
+    const timestamp = new Date().toISOString().replace(/[:]/g, '').replace(/\..*/, '');
+    const defaultName = `caustic_${timestamp}`;
+    const input = window.prompt('Save caustic as...', defaultName);
+    if (input === null) return;
+    const base = input.trim();
+    const query = base ? `?base=${encodeURIComponent(base)}` : '';
+    try {
+      const res = await fetch(`/caustic/save${query}`, { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const downloadName = res.headers.get('X-Download-Filename') || `${base || defaultName}.zip`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = downloadName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      alert(`Failed to save caustic dataset: ${parseServerError(error)}`);
+    }
+  }
 
   // ----- Beam options sync -----
   async function syncBeamOptions() {
@@ -346,6 +1098,10 @@
       btnGroup.style.display = 'flex';
       btnGroup.style.gap = '6px';
 
+      const addBtn = document.createElement('button');
+      addBtn.textContent = 'Add to caustic';
+      addBtn.onclick = (ev) => { ev.stopPropagation(); openCausticModal(r.id); };
+
       const resetBtn = document.createElement('button');
       resetBtn.textContent = 'Reset Max';
       resetBtn.onclick = () => resetMax(r.id);
@@ -355,6 +1111,7 @@
       delBtn.textContent = 'Delete';
       delBtn.onclick = () => deleteRoi(r.id);
 
+      btnGroup.appendChild(addBtn);
       btnGroup.appendChild(resetBtn);
       btnGroup.appendChild(delBtn);
 
@@ -373,7 +1130,7 @@
       card.appendChild(coords);
       card.appendChild(metrics);
       card.onclick = (e) => {
-        if (e.target === delBtn || e.target === resetBtn) return;
+        if (btnGroup.contains(e.target)) return;
         state.selectedId = r.id;
         drawOverlay();
       };
@@ -454,6 +1211,11 @@
       saveCutsBtn.textContent = 'Save Cuts';
       saveCutsBtn.onclick = () => downloadRoiZip(r.id, 'cuts');
       toolbar.appendChild(saveCutsBtn);
+
+      const addCausticBtn = document.createElement('button');
+      addCausticBtn.textContent = 'Add to caustic';
+      addCausticBtn.onclick = () => openCausticModal(r.id);
+      toolbar.appendChild(addCausticBtn);
 
       const resetBtn = document.createElement('button');
       resetBtn.textContent = 'Reset Max';
@@ -761,19 +1523,63 @@
         const res = await fetch(`/save_bundle?base=${encodeURIComponent(base)}`);
         if (!res.ok) throw new Error('Save failed');
         const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${base}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.warn(e);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${base}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        console.warn(e);
       }
     });
   }
+
+  if (causticCollapseBtn) {
+    causticCollapseBtn.addEventListener('click', () => {
+      state.caustic.collapsed = !state.caustic.collapsed;
+      updateCausticUi();
+    });
+  }
+  if (causticWavelength) {
+    causticWavelength.addEventListener('change', scheduleCausticConfigUpdate);
+    causticWavelength.addEventListener('blur', scheduleCausticConfigUpdate);
+  }
+  if (causticUnit) {
+    causticUnit.addEventListener('change', scheduleCausticConfigUpdate);
+    causticUnit.addEventListener('blur', scheduleCausticConfigUpdate);
+  }
+  if (causticSource) {
+    causticSource.addEventListener('change', scheduleCausticConfigUpdate);
+  }
+  if (causticFitBtn) {
+    causticFitBtn.addEventListener('click', requestCausticFit);
+  }
+  if (causticSaveBtn) {
+    causticSaveBtn.addEventListener('click', requestCausticSave);
+  }
+  if (causticModalClose) {
+    causticModalClose.addEventListener('click', closeCausticModal);
+  }
+  if (causticModalCancel) {
+    causticModalCancel.addEventListener('click', closeCausticModal);
+  }
+  if (causticModalAdd) {
+    causticModalAdd.addEventListener('click', submitCausticPoint);
+  }
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && causticModal && !causticModal.hidden) {
+      closeCausticModal();
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    renderCausticPlot();
+  });
+
+  updateCausticUi();
 
   // ----- Image events -----
   stream.addEventListener('load', () => {
@@ -835,7 +1641,8 @@
       syncControls(),
       syncCameraList(),
       refreshRois(),
-      syncBeamOptions()
+      syncBeamOptions(),
+      refreshCausticState()
     ]);
     pollMetrics();
     if (stream.complete) {

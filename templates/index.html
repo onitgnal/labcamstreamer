@@ -100,6 +100,42 @@
           </label>
         </section>
 
+        <section id="causticPanel" class="panel collapsible">
+          <div class="collapsible-header">
+            <h2>Caustic</h2>
+            <button id="causticCollapseBtn" class="collapse-toggle" aria-label="Toggle Caustic section"></button>
+          </div>
+          <div class="collapsible-body">
+            <label class="row space">
+              <span>Wavelength (nm)</span>
+              <input id="causticWavelength" type="number" step="any" placeholder="1030" />
+            </label>
+            <label class="row space">
+              <span>Position unit</span>
+              <input id="causticUnit" type="text" placeholder="mm" />
+            </label>
+            <label class="row space">
+              <span>Radii source</span>
+              <select id="causticSource">
+                <option value="gauss_1e2">Gaussian 1/e² radii (x, y)</option>
+                <option value="moment_2sigma">2σ second-moment radii (x, y)</option>
+              </select>
+            </label>
+            <div class="row caustic-actions">
+              <button id="causticFitBtn" class="primary">M² fit</button>
+            </div>
+            <div class="caustic-point-header">
+              <span class="roi">ROI</span>
+              <span class="z">z</span>
+              <span class="wx">wx</span>
+              <span class="wy">wy</span>
+              <span class="src">source</span>
+              <span class="remove"></span>
+            </div>
+            <div id="causticPointList" class="caustic-point-list"></div>
+          </div>
+        </section>
+
         <section class="panel">
           <h2>ROIs</h2>
           <div id="roiHint" class="hint">Add by dragging on the live view. Drag to move. Resize using handles.</div>
@@ -143,10 +179,51 @@
           <!-- JS will populate this -->
         </div>
       </section>
+
+      <section id="causticImagesSection" class="work-panel" hidden>
+        <div class="panel-header">
+          <h2>Caustic Images</h2>
+        </div>
+        <div id="causticImagesGrid" class="caustic-images-grid"></div>
+      </section>
+
+      <section id="causticPlotSection" class="work-panel" hidden>
+        <div class="panel-header">
+          <h2>Caustic Plot</h2>
+        </div>
+        <div class="caustic-plot-wrapper">
+          <canvas id="causticPlotCanvas"></canvas>
+          <div id="causticPlotEmpty" class="caustic-empty" hidden>No caustic data collected yet.</div>
+        </div>
+        <div class="caustic-plot-actions">
+          <button id="causticSaveBtn" class="secondary">Save caustic</button>
+        </div>
+        <div id="causticFitSummary" class="caustic-fit-summary"></div>
+      </section>
     </main>
   </div>
 
   <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+
+  <div id="causticAddModal" class="modal" hidden>
+    <div class="modal-content">
+      <span id="causticModalClose" class="close-button">&times;</span>
+      <h2>Add Point to Caustic</h2>
+      <p>Capture radii and imagery for this ROI at the specified z-position.</p>
+      <div class="modal-row">
+        <span class="label">ROI</span>
+        <span id="causticModalRoi" class="value">-</span>
+      </div>
+      <label class="modal-label">
+        <span>Z-position (<span id="causticModalUnit">mm</span>)</span>
+        <input type="number" id="causticModalZ" step="any" />
+      </label>
+      <div class="modal-actions">
+        <button id="causticModalCancel" class="secondary">Cancel</button>
+        <button id="causticModalAdd" class="primary">Add</button>
+      </div>
+    </div>
+  </div>
 
   <div id="backgroundSubtractionModal" class="modal" hidden>
     <div class="modal-content">
