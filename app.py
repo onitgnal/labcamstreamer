@@ -8,9 +8,7 @@ import time
 import zipfile
 import argparse
 import atexit
-import tempfile
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Generator, Optional, Tuple, List
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -22,13 +20,6 @@ from beam_analysis import analyze_beam
 
 from camera_service import CameraService, apply_colormap_to_gray, apply_colormap_to_bgr
 from metrics import MetricsComputer
-from models.caustic import (
-    CausticManager,
-    CausticPoint,
-    CausticRadiiSource,
-    convert_length_to_meters,
-    convert_meters_to_length,
-)
 from roi import ROIRegistry
 
 # ----- App setup -----
@@ -66,17 +57,6 @@ cam_service = CameraService(logger=app.logger)
 roi_registry = ROIRegistry()
 metrics = MetricsComputer()
 _plot_lock = threading.Lock()
-caustic_manager = CausticManager()
-
-CAUSTIC_CACHE_DIR = Path("caustic_cache")
-CAUSTIC_CACHE_DIR.mkdir(exist_ok=True)
-
-EXPORTS_DIR = Path("exports")
-EXPORTS_DIR.mkdir(exist_ok=True)
-
-CAUSTIC_AUTOSAVE_DIR = EXPORTS_DIR / "caustic_autosave"
-CAUSTIC_AUTOSAVE_DIR.mkdir(parents=True, exist_ok=True)
-caustic_manager.set_autosave_dir(CAUSTIC_AUTOSAVE_DIR)
 
 # ----- Beam analysis options (global) -----
 _beam_opts_lock = threading.Lock()
@@ -809,159 +789,6 @@ def _placeholder(text: str, size=(640, 360)) -> np.ndarray:
     cv2.putText(img, text, (20, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
     return img
 
-
-def _caustic_point_dir(point_id: str) -> Path:
-    path = CAUSTIC_CACHE_DIR / point_id
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _save_png_image(img: Optional[np.ndarray], path: Path) -> Optional[str]:
-    if img is None:
-        return None
-    png_bytes = _encode_png(img)
-    if not png_bytes:
-        return None
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(png_bytes)
-    return str(path)
-
-
-def _save_raw_roi_png(arr: Optional[np.ndarray], path: Path) -> Optional[str]:
-    if arr is None:
-        return None
-    data = np.asarray(arr)
-    if data.size == 0:
-        return None
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if data.dtype in (np.uint8, np.uint16):
-        encode_input = data
-    else:
-        float_data = np.asarray(data, dtype=np.float32)
-        float_data = np.nan_to_num(float_data, nan=0.0, posinf=0.0, neginf=0.0)
-        float_data = np.clip(float_data, 0.0, None)
-        max_val = float(np.max(float_data)) if float_data.size else 0.0
-        if max_val <= 0.0:
-            encode_input = np.zeros_like(float_data, dtype=np.uint16)
-        else:
-            encode_input = np.rint((float_data / max_val) * 65535.0).astype(np.uint16)
-    ok, buf = cv2.imencode(".png", encode_input)
-    if not ok:
-        return None
-    path.write_bytes(buf.tobytes())
-    return str(path)
-
-
-def _clean_float(value: Optional[float]) -> Optional[float]:
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not np.isfinite(v):
-        return None
-    return v
-
-
-def _extract_pixel_size_m(entry: Optional[Dict[str, object]]) -> Optional[float]:
-    if not entry:
-        return None
-    try:
-        value = entry.get("pixel_size")
-    except AttributeError:
-        return None
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result if np.isfinite(result) and result > 0.0 else None
-
-
-def _serialize_caustic_point(pt: CausticPoint, display_unit: str) -> Dict[str, object]:
-    z_display = convert_meters_to_length(pt.z_m, display_unit)
-    return {
-        "id": pt.point_id,
-        "roi_id": pt.roi_id,
-        "timestamp_iso": pt.timestamp_iso,
-        "z_m": pt.z_m,
-        "z_display": z_display,
-        "position_unit": display_unit,
-        "position_unit_at_capture": pt.position_unit_at_capture,
-        "wavelength_nm": pt.wavelength_nm,
-        "pixel_size_m": _clean_float(pt.pixel_size_m),
-        "radii": {
-            "gauss_1e2": {
-                "wx": _clean_float(pt.wx_1e2),
-                "wy": _clean_float(pt.wy_1e2),
-            },
-            "moment_2sigma": {
-                "wx": _clean_float(pt.wx_2sigma),
-                "wy": _clean_float(pt.wy_2sigma),
-            },
-        },
-        "images": {
-            "profile": f"/caustic/image/{pt.point_id}/profile" if pt.profile_img_path else None,
-            "cut_x": f"/caustic/image/{pt.point_id}/cut_x" if pt.cut_x_img_path else None,
-            "cut_y": f"/caustic/image/{pt.point_id}/cut_y" if pt.cut_y_img_path else None,
-            "raw": f"/caustic/image/{pt.point_id}/raw" if pt.raw_roi_img_path else None,
-        },
-    }
-
-
-def _format_fit_results_for_api(fits: Dict[str, Dict[str, float]], display_unit: str) -> Dict[str, object]:
-    formatted: Dict[str, object] = {}
-
-    for axis in ("x", "y"):
-        data = fits.get(axis) if isinstance(fits, dict) else None
-        if not isinstance(data, dict):
-            continue
-        sigma = data.get("sigma") if isinstance(data.get("sigma"), dict) else {}
-
-        def _sigma_val(key: str) -> Optional[float]:
-            return _clean_float(sigma.get(key)) if sigma else None
-
-        w0_m = _clean_float(data.get("w0_m"))
-        z0_m = _clean_float(data.get("z0_m"))
-        zr_m = _clean_float(data.get("zR_prime_m"))
-
-        sigma_w0 = _sigma_val("w0_m")
-        sigma_z0 = _sigma_val("z0_m")
-        sigma_zr = _sigma_val("zR_prime_m")
-        sigma_m2 = _sigma_val("M2")
-
-        formatted[axis] = {
-            "w0_m": w0_m,
-            "w0_um": w0_m * 1e6 if w0_m is not None else None,
-            "z0_m": z0_m,
-            "z0_display": convert_meters_to_length(z0_m, display_unit) if z0_m is not None else None,
-            "zR_prime_m": zr_m,
-            "zR_prime_display": convert_meters_to_length(zr_m, display_unit) if zr_m is not None else None,
-            "M2": _clean_float(data.get("M2")),
-            "sigma": {
-                "w0_m": sigma_w0,
-                "w0_um": sigma_w0 * 1e6 if sigma_w0 is not None else None,
-                "z0_m": sigma_z0,
-                "z0_display": convert_meters_to_length(sigma_z0, display_unit) if sigma_z0 is not None else None,
-                "zR_prime_m": sigma_zr,
-                "zR_prime_display": convert_meters_to_length(sigma_zr, display_unit) if sigma_zr is not None else None,
-                "M2": sigma_m2,
-            },
-        }
-    return formatted
-
-
-def _caustic_state_payload() -> Dict[str, object]:
-    config = caustic_manager.config_snapshot()
-    display_unit = str(config.get("position_unit", "mm"))
-    return {
-        "config": config,
-        "points": [
-            _serialize_caustic_point(pt, display_unit)
-            for pt in caustic_manager.list_points()
-        ],
-        "series": caustic_manager.get_plot_series(),
-        "fits": _format_fit_results_for_api(caustic_manager.fit_results(), display_unit),
-    }
-
 # ----- Routes -----
 
 @app.before_request
@@ -1162,201 +989,6 @@ def roi_reset_max_values(rid: str):
 @app.route("/metrics")
 def metrics_route():
     return jsonify(metrics.get_snapshot())
-
-
-# ----- Caustic endpoints -----
-@app.route("/caustic/state")
-def caustic_state():
-    return jsonify(_caustic_state_payload())
-
-
-@app.route("/caustic/config", methods=["POST"])
-def caustic_config():
-    data = request.get_json(silent=True) or {}
-
-    if "wavelength_nm" in data:
-        try:
-            wavelength = float(data["wavelength_nm"])
-        except (TypeError, ValueError):
-            return jsonify({"error": "Invalid wavelength"}), 400
-        if wavelength <= 0.0:
-            return jsonify({"error": "Wavelength must be positive"}), 400
-        caustic_manager.set_wavelength_nm(wavelength)
-
-    if "position_unit" in data:
-        unit = str(data["position_unit"] or "").strip()
-        if unit:
-            try:
-                caustic_manager.set_position_unit(unit)
-            except ValueError as exc:
-                return jsonify({"error": str(exc)}), 400
-
-    if "radii_source" in data:
-        try:
-            source = CausticRadiiSource.from_label(str(data["radii_source"]))
-            caustic_manager.set_radii_source(source)
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-
-    return jsonify(_caustic_state_payload())
-
-
-@app.route("/caustic/add", methods=["POST"])
-def caustic_add_point():
-    data = request.get_json(silent=True) or {}
-    roi_id = data.get("roi_id")
-    if not roi_id:
-        return jsonify({"error": "roi_id is required"}), 400
-
-    try:
-        z_value = float(data.get("z"))
-    except (TypeError, ValueError):
-        return jsonify({"error": "Invalid z value"}), 400
-
-    config = caustic_manager.config_snapshot()
-    try:
-        z_m = convert_length_to_meters(z_value, str(config.get("position_unit", "mm")))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-
-    entry = beam_manager.get(roi_id)
-    result = entry.get("result") if entry else None
-    if not isinstance(result, dict):
-        return jsonify({"error": "ROI analysis unavailable"}), 404
-
-    gauss_x = result.get("gauss_fit_x") or {}
-    gauss_y = result.get("gauss_fit_y") or {}
-
-    try:
-        wx_1e2 = float(gauss_x.get("radius"))
-        wy_1e2 = float(gauss_y.get("radius"))
-        wx_2sigma = float(result.get("rx_iso"))
-        wy_2sigma = float(result.get("ry_iso"))
-    except (TypeError, ValueError):
-        return jsonify({"error": "Beam radii unavailable"}), 400
-
-    if wx_1e2 <= 0.0 or wy_1e2 <= 0.0:
-        return jsonify({"error": "Gaussian radii unavailable"}), 400
-    if wx_2sigma <= 0.0 or wy_2sigma <= 0.0:
-        return jsonify({"error": "Second-moment radii unavailable"}), 400
-
-    point_id = caustic_manager.generate_point_id()
-    point_dir = _caustic_point_dir(point_id)
-
-    profile_img = _compose_roi_profile_image(roi_id)
-    profile_path = _save_png_image(profile_img, point_dir / "profile.png") or ""
-
-    cut_x_path = ""
-    cut_y_path = ""
-    cuts_img = _compose_roi_cuts_image(roi_id)
-    if cuts_img is not None:
-        try:
-            h, w = cuts_img.shape[:2]
-            mid = max(1, w // 2)
-            cut_x_img = cuts_img[:, :mid].copy()
-            cut_y_img = cuts_img[:, mid:].copy()
-        except Exception:
-            cut_x_img = cuts_img
-            cut_y_img = cuts_img
-        if cut_x_img.size == 0:
-            cut_x_img = cuts_img
-        if cut_y_img.size == 0:
-            cut_y_img = cuts_img
-        cut_x_path = _save_png_image(cut_x_img, point_dir / "cut_x.png") or ""
-        cut_y_path = _save_png_image(cut_y_img, point_dir / "cut_y.png") or ""
-
-    roi_gray = _get_roi_gray_image(roi_id, entry=entry)
-    raw_path = _save_raw_roi_png(roi_gray, point_dir / "raw.png") if roi_gray is not None else None
-    pixel_size_m = _extract_pixel_size_m(entry)
-
-    timestamp_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    point = CausticPoint(
-        point_id=point_id,
-        roi_id=str(roi_id),
-        timestamp_iso=timestamp_iso,
-        z_m=z_m,
-        position_unit_at_capture=str(config.get("position_unit", "mm")),
-        wavelength_nm=float(config.get("wavelength_nm", 1030.0)),
-        pixel_size_m=pixel_size_m,
-        wx_1e2=wx_1e2,
-        wy_1e2=wy_1e2,
-        wx_2sigma=wx_2sigma,
-        wy_2sigma=wy_2sigma,
-        profile_img_path=profile_path,
-        cut_x_img_path=cut_x_path,
-        cut_y_img_path=cut_y_path,
-        raw_roi_img_path=raw_path,
-    )
-    caustic_manager.add_point(point)
-
-    state = _caustic_state_payload()
-    state["last_added_point_id"] = point_id
-    return jsonify(state)
-
-
-@app.route("/caustic/<point_id>", methods=["DELETE"])
-def caustic_remove_point(point_id: str):
-    if not point_id:
-        return jsonify({"deleted": False}), 400
-    removed = caustic_manager.remove_point(point_id)
-    state = _caustic_state_payload()
-    state["deleted"] = bool(removed)
-    return jsonify(state)
-
-
-@app.route("/caustic/fit", methods=["POST"])
-def caustic_fit():
-    try:
-        caustic_manager.compute_m2_fit()
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    return jsonify(_caustic_state_payload())
-
-
-@app.route("/caustic/save", methods=["POST"])
-def caustic_save():
-    base_param = (request.args.get("base", "") or "").strip()
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    fallback = f"caustic_{timestamp}"
-    base = _sanitize_filename(base_param, fallback)
-
-    target_dir = EXPORTS_DIR / base
-    result = caustic_manager.export_dataset(target_dir, clean=True)
-
-    mem = io.BytesIO()
-    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        export_root = Path(result["path"])
-        base_folder = base
-        for file_path in export_root.rglob("*"):
-            if file_path.is_file():
-                arcname = f"{base_folder}/{file_path.relative_to(export_root)}"
-                zf.write(file_path, arcname)
-    mem.seek(0)
-
-    download_name = f"{base}.zip"
-    response = send_file(mem, mimetype="application/zip", as_attachment=True, download_name=download_name)
-    response.headers["X-Download-Filename"] = download_name
-    return response
-
-
-@app.route("/caustic/image/<point_id>/<kind>")
-def caustic_image(point_id: str, kind: str):
-    point = caustic_manager.get_point(point_id)
-    if not point:
-        return jsonify({"error": "Not found"}), 404
-    path_map = {
-        "profile": point.profile_img_path,
-        "cut_x": point.cut_x_img_path,
-        "cut_y": point.cut_y_img_path,
-        "raw": point.raw_roi_img_path,
-    }
-    path_str = path_map.get(kind)
-    if not path_str:
-        return jsonify({"error": "Image unavailable"}), 404
-    fs_path = Path(path_str)
-    if not fs_path.exists():
-        return jsonify({"error": "Image unavailable"}), 404
-    return send_file(fs_path, mimetype="image/png")
 
 
 # ROI mini-streams (~10 Hz)
@@ -1770,14 +1402,6 @@ def save_bundle():
                 zf.writestr(f"{roi_dir}/{safe_rid}_cuts.tsv", report["spectra_tsv"])
                 zf.writestr(f"{roi_dir}/{safe_rid}_cuts.csv", report["spectra_csv"])
                 zf.writestr(f"{roi_dir}/{safe_rid}_cuts_analysis.txt", report["analysis_text"])
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            export_dir = Path(tmp_dir) / "caustic"
-            caustic_manager.export_dataset(export_dir, clean=True)
-            for file_path in export_dir.rglob("*"):
-                if file_path.is_file():
-                    arcname = f"caustic/{file_path.relative_to(export_dir)}"
-                    zf.write(file_path, arcname)
 
     mem.seek(0)
     return send_file(mem, mimetype="application/zip", as_attachment=True, download_name=f"{base}.zip")
