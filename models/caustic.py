@@ -78,9 +78,10 @@ def format_caustic_raw_filename(
     timestamp_iso: Optional[str],
     z_value: float,
     unit: str,
+    pixel_size_m: Optional[float] = None,
 ) -> str:
     """
-    Build a filename like YYYYMMDD_pos_4.123_mm.bmp, preserving sign information.
+    Build a filename like YYYYMMDD_pixelsize_16e-15_m_pos_-2.1_mm.bmp.
     """
     if timestamp_iso:
         date_part = _sanitize_filename_part(timestamp_iso.split("T", 1)[0].replace("-", ""), "date")
@@ -89,14 +90,30 @@ def format_caustic_raw_filename(
 
     unit_part = _sanitize_filename_part(unit, "unit")
 
-    value = float(z_value)
-    magnitude = abs(value)
-    value_part = f"{magnitude:.6f}".rstrip("0").rstrip(".")
-    if "." not in value_part:
-        value_part += ".0"
-    sign_part = "neg_" if value < 0 else ""
+    try:
+        pixel_val = float(pixel_size_m) if pixel_size_m not in (None, "", "null") else None
+    except (TypeError, ValueError):
+        pixel_val = None
+    pixel_str = "unknown"
+    if pixel_val is not None and pixel_val > 0.0 and math.isfinite(pixel_val):
+        sci = f"{pixel_val:.6e}"
+        mantissa_str, exp_str = sci.split("e")
+        exp = int(exp_str)
+        mantissa_digits = mantissa_str.replace(".", "").rstrip("0")
+        if not mantissa_digits:
+            mantissa_digits = "0"
+        adjust = len(mantissa_digits) - 1
+        exp -= adjust
+        pixel_str = f"{mantissa_digits}e{exp}"
+    pixel_part = _sanitize_filename_part(pixel_str, "unknown")
 
-    return f"{date_part}_pos_{sign_part}{value_part}_{unit_part}.bmp"
+    value = float(z_value)
+    value_str = f"{value:.6f}".rstrip("0").rstrip(".")
+    if value_str in {"", "-"}:
+        value_str = "0"
+    value_part = _sanitize_filename_part(value_str, "0")
+
+    return f"{date_part}_pixelsize_{pixel_part}_m_pos_{value_part}_{unit_part}.bmp"
 
 
 def convert_length_to_meters(value: float, unit: str) -> float:
@@ -453,6 +470,7 @@ class CausticManager:
                 pt.timestamp_iso,
                 z_display,
                 config["position_unit"],
+                pt.pixel_size_m,
             )
             raw_dst = images_dir / f"{prefix}_{raw_filename}"
             if pt.raw_roi_img_path:

@@ -1328,19 +1328,20 @@ def caustic_add_point():
         cut_x_path = _save_png_image(cut_x_img, point_dir / "cut_x.png") or ""
         cut_y_path = _save_png_image(cut_y_img, point_dir / "cut_y.png") or ""
 
+    pixel_size_m = _extract_pixel_size_m(entry)
+    if pixel_size_m is None:
+        fallback_pixel = _get_configured_pixel_size()
+        if fallback_pixel is not None:
+            pixel_size_m = fallback_pixel
+
     roi_gray = _get_roi_gray_image(roi_id, entry=entry)
     raw_roi = _get_roi_raw_gray_image(roi_id)
     raw_source = raw_roi if raw_roi is not None else roi_gray
     raw_path = None
     if raw_source is not None:
         z_unit = str(config.get("position_unit", "mm") or "mm")
-        raw_filename = format_caustic_raw_filename(timestamp_iso, z_value, z_unit)
+        raw_filename = format_caustic_raw_filename(timestamp_iso, z_value, z_unit, pixel_size_m)
         raw_path = _save_raw_roi_bmp(raw_source, point_dir / raw_filename)
-    pixel_size_m = _extract_pixel_size_m(entry)
-    if pixel_size_m is None:
-        fallback_pixel = _get_configured_pixel_size()
-        if fallback_pixel is not None:
-            pixel_size_m = fallback_pixel
 
     point = CausticPoint(
         point_id=point_id,
