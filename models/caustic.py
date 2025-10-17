@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 import threading
 import uuid
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from datetime import datetime
 
 import numpy as np
 from scipy.optimize import curve_fit
@@ -19,6 +21,7 @@ __all__ = [
     "CausticManager",
     "convert_length_to_meters",
     "convert_meters_to_length",
+    "format_caustic_raw_filename",
 ]
 
 
@@ -59,6 +62,41 @@ _UNIT_FACTORS: Dict[str, float] = {
     "foot": 0.3048,
     "feet": 0.3048,
 }
+
+
+_FILENAME_SANITIZER = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_filename_part(value: str, fallback: str) -> str:
+    trimmed = str(value or "").strip()
+    cleaned = _FILENAME_SANITIZER.sub("_", trimmed)
+    cleaned = cleaned.strip("_")
+    return cleaned or fallback
+
+
+def format_caustic_raw_filename(
+    timestamp_iso: Optional[str],
+    z_value: float,
+    unit: str,
+) -> str:
+    """
+    Build a filename like YYYYMMDD_pos_4.123_mm.bmp, preserving sign information.
+    """
+    if timestamp_iso:
+        date_part = _sanitize_filename_part(timestamp_iso.split("T", 1)[0].replace("-", ""), "date")
+    else:
+        date_part = datetime.utcnow().strftime("%Y%m%d")
+
+    unit_part = _sanitize_filename_part(unit, "unit")
+
+    value = float(z_value)
+    magnitude = abs(value)
+    value_part = f"{magnitude:.6f}".rstrip("0").rstrip(".")
+    if "." not in value_part:
+        value_part += ".0"
+    sign_part = "neg_" if value < 0 else ""
+
+    return f"{date_part}_pos_{sign_part}{value_part}_{unit_part}.bmp"
 
 
 def convert_length_to_meters(value: float, unit: str) -> float:
@@ -209,6 +247,7 @@ class CausticManager:
         self._position_unit: str = "mm"
         self._fit_results: Dict[str, Dict[str, float]] = {}
         self._autosave_dir: Optional[Path] = None
+        self._default_pixel_size_m: Optional[float] = None
 
     def set_autosave_dir(self, path: Path) -> None:
         with self._lock:
@@ -247,6 +286,10 @@ class CausticManager:
 
     def add_point(self, point: CausticPoint) -> CausticPoint:
         with self._lock:
+            if (point.pixel_size_m is None or point.pixel_size_m <= 0.0) and self._default_pixel_size_m:
+                point.pixel_size_m = self._default_pixel_size_m
+            if point.pixel_size_m is not None and point.pixel_size_m > 0.0:
+                self._default_pixel_size_m = float(point.pixel_size_m)
             self._points.append(point)
         self._autosave()
         return point
@@ -303,15 +346,31 @@ class CausticManager:
             points = list(self._points)
             wavelength_nm = self._wavelength_nm
             source = self._radii_source
+            default_pixel_size = self._default_pixel_size_m
 
         wavelength_m = max(1e-12, float(wavelength_nm) * 1e-9)
         z_data: List[float] = []
         w_x: List[float] = []
         w_y: List[float] = []
 
-        for pt in sorted(points, key=lambda p: p.z_m):
+        ordered_points = sorted(points, key=lambda p: p.z_m)
+
+        fallback_pixel_size = None
+        for pt in ordered_points:
+            if pt.pixel_size_m is not None and pt.pixel_size_m > 0.0:
+                fallback_pixel_size = float(pt.pixel_size_m)
+                break
+        if fallback_pixel_size is None and default_pixel_size is not None and default_pixel_size > 0.0:
+            fallback_pixel_size = float(default_pixel_size)
+
+        for pt in ordered_points:
             if pt.pixel_size_m is None or pt.pixel_size_m <= 0.0:
-                raise ValueError("Pixel size must be configured for all points to compute M^2.")
+                if fallback_pixel_size is not None:
+                    pt.pixel_size_m = fallback_pixel_size
+                else:
+                    raise ValueError(
+                        f"Pixel size must be configured for all points to compute M^2 (missing for ROI {pt.roi_id})."
+                    )
             scale = float(pt.pixel_size_m)
             z_data.append(pt.z_m)
             if source is CausticRadiiSource.GAUSS_1E2:
@@ -364,7 +423,6 @@ class CausticManager:
             profile_dst = images_dir / f"{prefix}_profile.png"
             cut_x_dst = images_dir / f"{prefix}_cut_x.png"
             cut_y_dst = images_dir / f"{prefix}_cut_y.png"
-            raw_dst = images_dir / f"{prefix}_raw.bmp"
 
             has_profile = False
             has_cut_x = False
@@ -386,16 +444,22 @@ class CausticManager:
                 if src.exists():
                     shutil.copy2(src, cut_y_dst)
                     has_cut_y = True
+            try:
+                z_display = convert_meters_to_length(pt.z_m, config["position_unit"])
+            except ValueError:
+                z_display = pt.z_m
+
+            raw_filename = format_caustic_raw_filename(
+                pt.timestamp_iso,
+                z_display,
+                config["position_unit"],
+            )
+            raw_dst = images_dir / f"{prefix}_{raw_filename}"
             if pt.raw_roi_img_path:
                 src = Path(pt.raw_roi_img_path)
                 if src.exists():
                     shutil.copy2(src, raw_dst)
                     has_raw = True
-
-            try:
-                z_display = convert_meters_to_length(pt.z_m, config["position_unit"])
-            except ValueError:
-                z_display = pt.z_m
 
             csv_lines.append(
                 ",".join(

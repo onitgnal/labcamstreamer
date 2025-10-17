@@ -28,6 +28,7 @@ from models.caustic import (
     CausticRadiiSource,
     convert_length_to_meters,
     convert_meters_to_length,
+    format_caustic_raw_filename,
 )
 from roi import ROIRegistry
 
@@ -89,6 +90,18 @@ _beam_opts = {
     "rotation": "auto",             # one of: auto, fixed
     "fixed_angle": None,             # degrees (float) when rotation == fixed
 }
+
+
+def _get_configured_pixel_size() -> Optional[float]:
+    with _beam_opts_lock:
+        value = _beam_opts.get("pixel_size")
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(result) or result <= 0.0:
+        return None
+    return result
 
 
 def _get_beam_options_copy() -> Dict[str, object]:
@@ -882,16 +895,18 @@ def _clean_float(value: Optional[float]) -> Optional[float]:
 
 def _extract_pixel_size_m(entry: Optional[Dict[str, object]]) -> Optional[float]:
     if not entry:
-        return None
+        return _get_configured_pixel_size()
     try:
         value = entry.get("pixel_size")
     except AttributeError:
-        return None
+        value = None
     try:
         result = float(value)
     except (TypeError, ValueError):
-        return None
-    return result if np.isfinite(result) and result > 0.0 else None
+        result = None
+    if result is not None and np.isfinite(result) and result > 0.0:
+        return result
+    return _get_configured_pixel_size()
 
 
 def _serialize_caustic_point(pt: CausticPoint, display_unit: str) -> Dict[str, object]:
@@ -1289,6 +1304,7 @@ def caustic_add_point():
 
     point_id = caustic_manager.generate_point_id()
     point_dir = _caustic_point_dir(point_id)
+    timestamp_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
     profile_img = _compose_roi_profile_image(roi_id)
     profile_path = _save_png_image(profile_img, point_dir / "profile.png") or ""
@@ -1317,20 +1333,15 @@ def caustic_add_point():
     raw_source = raw_roi if raw_roi is not None else roi_gray
     raw_path = None
     if raw_source is not None:
-        z_unit = str(config.get("position_unit", "mm") or "").strip()
-        sign_prefix = "neg_" if z_value < 0 else ""
-        magnitude = abs(z_value)
-        z_numeric = f"{magnitude:.6g}"
-        suffix_parts = [sign_prefix + z_numeric if sign_prefix else z_numeric]
-        if z_unit:
-            suffix_parts.append(z_unit)
-        z_suffix = "_".join(part for part in suffix_parts if part)
-        z_slug = _SAFE_FILENAME_RE.sub('_', z_suffix).strip('_') or "z"
-        raw_filename = f"raw_{z_slug}.bmp"
+        z_unit = str(config.get("position_unit", "mm") or "mm")
+        raw_filename = format_caustic_raw_filename(timestamp_iso, z_value, z_unit)
         raw_path = _save_raw_roi_bmp(raw_source, point_dir / raw_filename)
     pixel_size_m = _extract_pixel_size_m(entry)
+    if pixel_size_m is None:
+        fallback_pixel = _get_configured_pixel_size()
+        if fallback_pixel is not None:
+            pixel_size_m = fallback_pixel
 
-    timestamp_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     point = CausticPoint(
         point_id=point_id,
         roi_id=str(roi_id),
@@ -1388,6 +1399,15 @@ def caustic_save():
     except Exception as exc:
         app.logger.error(f"Failed to refresh caustic autosave: {exc}", exc_info=True)
         return jsonify({"error": "Caustic autosave unavailable"}), 500
+
+    if not export_root.exists():
+        fallback_dir = EXPORTS_DIR / base
+        try:
+            export_meta = caustic_manager.export_dataset(fallback_dir, clean=True)
+            export_root = Path(export_meta.get("path", fallback_dir))
+        except Exception as exc:
+            app.logger.error(f"Failed to export caustic dataset to fallback dir: {exc}", exc_info=True)
+            return jsonify({"error": "Caustic data export failed"}), 500
 
     if not export_root.exists():
         return jsonify({"error": "No caustic data available"}), 404
