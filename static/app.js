@@ -226,6 +226,46 @@
     return sum / values.length;
   }
 
+  function niceNumber(value, round) {
+    if (!Number.isFinite(value) || value === 0) return 0;
+    const exponent = Math.floor(Math.log10(Math.abs(value)));
+    const fraction = Math.abs(value) / Math.pow(10, exponent);
+    let niceFraction;
+    if (round) {
+      if (fraction < 1.5) niceFraction = 1;
+      else if (fraction < 3) niceFraction = 2;
+      else if (fraction < 7) niceFraction = 5;
+      else niceFraction = 10;
+    } else {
+      if (fraction <= 1) niceFraction = 1;
+      else if (fraction <= 2) niceFraction = 2;
+      else if (fraction <= 5) niceFraction = 5;
+      else niceFraction = 10;
+    }
+    return Math.sign(value) * niceFraction * Math.pow(10, exponent);
+  }
+
+  function computeTicks(min, max, maxTicks = 6) {
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+    if (min === max) {
+      if (min === 0) return [0];
+      const step = niceNumber(Math.abs(min), true) || 1;
+      return [min - step, min, min + step];
+    }
+    const span = Math.abs(max - min);
+    if (!Number.isFinite(span) || span === 0) return [min];
+    const niceSpan = niceNumber(span, false) || span;
+    const step = Math.max(niceNumber(niceSpan / Math.max(1, maxTicks - 1), true), 1e-12);
+    const niceMin = Math.floor(min / step) * step;
+    const niceMax = Math.ceil(max / step) * step;
+    const ticks = [];
+    for (let v = niceMin; v <= niceMax + step * 0.5; v += step) {
+      ticks.push(Number(v.toPrecision(12)));
+      if (ticks.length > maxTicks * 4) break;
+    }
+    return ticks;
+  }
+
   function parseServerError(error) {
     if (!error) return 'Unknown error';
     if (typeof error === 'string') {
@@ -510,6 +550,8 @@
 
     const series = state.caustic.series || { z: [], wx: [], wy: [] };
     const pointsForPlot = points.slice().sort((a, b) => Number(a.z_m) - Number(b.z_m));
+    const unit = state.caustic.config?.position_unit || 'mm';
+    const pixelSize = getUniformPixelSize(points);
 
     let zValues = (series.z || []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
     let wxValues = (series.wx || []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
@@ -527,7 +569,7 @@
         const zCandidate = Number(point.z_display);
         const zValue = Number.isFinite(zCandidate)
           ? zCandidate
-          : convertMetersToUnit(Number(point.z_m), state.caustic.config?.position_unit || 'mm');
+          : convertMetersToUnit(Number(point.z_m), unit);
         const wxCandidate = Number(radii.wx);
         const wyCandidate = Number(radii.wy);
         if (!Number.isFinite(zValue) || !Number.isFinite(wxCandidate) || !Number.isFinite(wyCandidate)) continue;
@@ -536,6 +578,36 @@
         wyValues.push(wyCandidate);
       }
       count = Math.min(zValues.length, wxValues.length, wyValues.length);
+    }
+
+    const perPointScales = pointsForPlot.map((pt) => {
+      const raw = Number(pt.pixel_size_m);
+      return Number.isFinite(raw) && raw > 0 ? raw : null;
+    });
+
+    let useMeterUnits = true;
+    if (count > 0) {
+      const wxMeters = [];
+      const wyMeters = [];
+      const pixelSizeFallback = Number.isFinite(pixelSize) && pixelSize > 0 ? pixelSize : null;
+      for (let i = 0; i < count; i++) {
+        const scaleCandidate = perPointScales[i];
+        const scale = Number.isFinite(scaleCandidate) && scaleCandidate > 0 ? scaleCandidate : pixelSizeFallback;
+        const wxVal = wxValues[i];
+        const wyVal = wyValues[i];
+        if (!Number.isFinite(wxVal) || !Number.isFinite(wyVal) || !Number.isFinite(scale) || scale <= 0) {
+          useMeterUnits = false;
+          break;
+        }
+        wxMeters.push(wxVal * scale);
+        wyMeters.push(wyVal * scale);
+      }
+      if (useMeterUnits && wxMeters.length === count && wyMeters.length === count) {
+        wxValues = wxMeters;
+        wyValues = wyMeters;
+      } else {
+        useMeterUnits = false;
+      }
     }
 
     if (!count) {
@@ -566,7 +638,7 @@
     ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx2d.clearRect(0, 0, width, height);
 
-    const margins = { left: 60, right: 20, top: 20, bottom: 50 };
+    const margins = { left: 70, right: 20, top: 20, bottom: 60 };
     const plotW = Math.max(10, width - margins.left - margins.right);
     const plotH = Math.max(10, height - margins.top - margins.bottom);
 
@@ -600,13 +672,50 @@
     ctx2d.lineTo(margins.left, margins.top);
     ctx2d.stroke();
 
+    const xTicks = computeTicks(zLower, zUpper, 6);
+    const yTicks = computeTicks(wLower, wUpper, 6);
+
+    ctx2d.strokeStyle = '#424854';
     ctx2d.fillStyle = '#8b93a7';
     ctx2d.font = '12px sans-serif';
-    ctx2d.fillText(`z (${state.caustic.config?.position_unit || 'mm'})`, width / 2 - 20, height - 16);
+
+    ctx2d.textAlign = 'center';
+    ctx2d.textBaseline = 'top';
+    for (const tick of xTicks) {
+      if (!Number.isFinite(tick)) continue;
+      if (tick < zLower - zRange * 0.01 || tick > zUpper + zRange * 0.01) continue;
+      const x = toX(tick);
+      if (x < margins.left - 1 || x > width - margins.right + 1) continue;
+      ctx2d.beginPath();
+      ctx2d.moveTo(x, height - margins.bottom);
+      ctx2d.lineTo(x, height - margins.bottom + 6);
+      ctx2d.stroke();
+      ctx2d.fillText(formatNumber(tick, 4), x, height - margins.bottom + 8);
+    }
+
+    ctx2d.textAlign = 'right';
+    ctx2d.textBaseline = 'middle';
+    for (const tick of yTicks) {
+      if (!Number.isFinite(tick)) continue;
+      if (tick < wLower - wRange * 0.01 || tick > wUpper + wRange * 0.01) continue;
+      const y = toY(tick);
+      if (y < margins.top - 1 || y > height - margins.bottom + 1) continue;
+      ctx2d.beginPath();
+      ctx2d.moveTo(margins.left - 6, y);
+      ctx2d.lineTo(margins.left, y);
+      ctx2d.stroke();
+      ctx2d.fillText(formatNumber(tick, 4), margins.left - 8, y);
+    }
+
+    ctx2d.textAlign = 'center';
+    ctx2d.textBaseline = 'bottom';
+    ctx2d.fillText(`z (${unit})`, margins.left + plotW / 2, height - 8);
     ctx2d.save();
-    ctx2d.translate(18, height / 2 + 20);
+    ctx2d.translate(20, margins.top + plotH / 2);
     ctx2d.rotate(-Math.PI / 2);
-    ctx2d.fillText('Radius (pixels)', 0, 0);
+    ctx2d.textAlign = 'center';
+    ctx2d.textBaseline = 'middle';
+    ctx2d.fillText(useMeterUnits ? 'Radius (m)' : 'Radius (pixels)', 0, 0);
     ctx2d.restore();
 
     const drawSeries = (values, color) => {
@@ -649,15 +758,13 @@
     drawPoints(wxValues, '#e2904a');
     drawPoints(wyValues, '#c2e350');
 
-    const pixelSize = getUniformPixelSize(points);
     const fits = state.caustic.fits || {};
-    const unit = state.caustic.config?.position_unit || 'mm';
 
     const plotFit = (axisKey, color) => {
       const fit = fits[axisKey];
       if (!fit) return;
       if (!Number.isFinite(fit.w0_m) || !Number.isFinite(fit.z0_m) || !Number.isFinite(fit.zR_prime_m)) return;
-      if (!pixelSize || pixelSize <= 0) return;
+      if (!useMeterUnits && (!Number.isFinite(pixelSize) || pixelSize <= 0)) return;
       const zMeters = pointsForPlot.map((pt) => Number(pt.z_m)).filter((v) => Number.isFinite(v));
       if (!zMeters.length) return;
       const minM = Math.min(...zMeters);
@@ -672,7 +779,7 @@
         const term = (z - fit.z0_m) / fit.zR_prime_m;
         const w = Math.sqrt(Math.max(0, fit.w0_m * fit.w0_m * (1 + term * term)));
         const zDisplay = convertMetersToUnit(z, unit);
-        const wDisplay = w / pixelSize;
+        const wDisplay = useMeterUnits ? w : w / pixelSize;
         if (!Number.isFinite(zDisplay) || !Number.isFinite(wDisplay)) continue;
         samples.push({ z: zDisplay, w: wDisplay });
       }
