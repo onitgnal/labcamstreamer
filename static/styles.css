@@ -171,6 +171,44 @@ body{
 }
 .primary:hover{ filter:brightness(1.07); }
 
+.secondary{
+  padding:8px 12px;
+  border-radius:8px;
+  border:1px solid var(--panel-border);
+  background:#1b222f;
+  color:var(--text);
+  cursor:pointer;
+}
+.secondary:hover{ filter:brightness(1.08); }
+.secondary:disabled{
+  opacity:0.55;
+  cursor:not-allowed;
+}
+
+.background-controls{
+  align-items:center;
+  gap:12px;
+}
+.background-controls .background-toggle{
+  flex:1 1 auto;
+  justify-content:space-between;
+}
+.background-controls button{
+  padding:6px 10px;
+  border-radius:8px;
+  border:1px solid var(--panel-border);
+  background:#1b222f;
+  color:var(--text);
+  cursor:pointer;
+}
+.background-controls button:disabled{
+  opacity:0.55;
+  cursor:not-allowed;
+}
+.background-controls button:not(:disabled):hover{
+  filter:brightness(1.08);
+}
+
 .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color:#cfd6e6; }
 
 /* Inputs */
@@ -230,6 +268,9 @@ input[type="text"]:disabled{
   color:var(--muted);
   font-size:12px;
 }
+.roi-card .metrics span.warn{
+  color:var(--danger);
+}
 .roi-card .coords{
   color:#ced6ea;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -248,6 +289,10 @@ input[type="text"]:disabled{
   border-color:#3a1d23;
   background:#1a0e12;
   color:#ffc1c7;
+}
+.roi-card.saturated{
+  border-color:var(--danger);
+  box-shadow:0 0 0 1px rgba(255,92,108,0.25);
 }
 
 .caustic-images-grid{
@@ -390,6 +435,9 @@ input[type="text"]:disabled{
   gap:12px;
   color:#b7c1d8;
 }
+.stats span.warn{
+  color:var(--danger);
+}
 
 /* Live container */
 .live-container{
@@ -485,6 +533,24 @@ input[type="text"]:disabled{
   justify-content: space-between;
   align-items: center;
   font-weight: 600;
+}
+.per-roi-card .header .id-group{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.per-roi-card .header .peak{
+  margin-left:auto;
+  font-size:12px;
+  color:var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.per-roi-card .header .peak.warn{
+  color:var(--danger);
+}
+.per-roi-card.saturated{
+  border-color:var(--danger);
+  box-shadow:0 0 0 1px rgba(255,92,108,0.2);
 }
 
 .per-roi-card .header .title {

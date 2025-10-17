@@ -14,7 +14,9 @@ class RoiMetric:
     id: str
     sum_gray: int          # Background-corrected sum over ROI
     value_per_ms: float    # Exposure-normalized value (per ms)
-    max_pixel_per_ms: float # Exposure-normalized max pixel value
+    max_pixel_per_ms: float # Exposure-normalized max pixel value (background-corrected)
+    max_pixel_value: float  # Background-corrected max pixel value (raw units)
+    max_pixel_raw: float    # Max pixel value from raw frame (no subtraction)
     raw_sum: int           # Raw sum over ROI (no background subtraction)
     bg_mean: float         # Mean of background ring around ROI
 
@@ -48,6 +50,8 @@ class MetricsComputer:
             "rois": [],  # list[dict]
             "y_max_integral": {}, # dict[str, float]
             "y_max_pixel": {}, # dict[str, float]
+            "frame_max_pixel": 0.0,
+            "frame_max_pixel_raw": 0.0,
         }
 
     # ---------- Helpers ----------
@@ -123,6 +127,8 @@ class MetricsComputer:
         gray: Optional[np.ndarray],
         exposure_us: int,
         rois: Optional[Sequence[object]],
+        *,
+        raw_gray: Optional[np.ndarray] = None,
     ) -> None:
         """
         Update metrics snapshot using the latest gray frame, exposure, and ROIs.
@@ -137,6 +143,15 @@ class MetricsComputer:
         roi_metrics: List[RoiMetric] = []
         rois_iter: Sequence[Any] = rois if rois is not None else []
 
+        frame_max = 0.0
+        frame_max_raw = 0.0
+        if isinstance(gray, np.ndarray) and gray.size > 0:
+            frame_max = float(np.max(gray))
+        if raw_gray is None:
+            raw_gray = gray
+        if isinstance(raw_gray, np.ndarray) and raw_gray.size > 0:
+            frame_max_raw = float(np.max(raw_gray))
+
         for r in rois_iter:
             # Support both dataclass/attribute-style and dict-style ROIs
             rid = getattr(r, "id", None) if hasattr(r, "id") else (r.get("id") if isinstance(r, dict) else None)
@@ -149,12 +164,16 @@ class MetricsComputer:
 
             s_raw = 0
             bg = 0.0
+            crop = None
+            crop_raw = None
             if isinstance(gray, np.ndarray) and gray.size > 0:
                 crop = self._safe_crop(gray, int(x), int(y), int(w), int(h))
                 if crop.size > 0:
                     # Use uint64 to avoid overflow on big ROIs
                     s_raw = int(np.sum(crop, dtype=np.uint64))
                 bg = float(self._background_mean(gray, int(x), int(y), int(w), int(h), t=2))
+            if isinstance(raw_gray, np.ndarray) and raw_gray.size > 0:
+                crop_raw = self._safe_crop(raw_gray, int(x), int(y), int(w), int(h))
 
             area = max(1, int(w) * int(h))
             s_corr = int(max(0.0, float(s_raw) - bg * float(area)))
@@ -164,12 +183,16 @@ class MetricsComputer:
 
             # Also find max pixel value
             max_px_per_ms = 0.0
-            if isinstance(gray, np.ndarray) and gray.size > 0:
-                crop = self._safe_crop(gray, int(x), int(y), int(w), int(h))
-                if crop.size > 0:
-                    corrected_crop = np.maximum(0, crop.astype(np.float32) - bg)
-                    max_px_raw = np.max(corrected_crop)
-                    max_px_per_ms = (float(max_px_raw) / exp_us) * 1000.0
+            max_px_value = 0.0
+            max_px_raw = 0.0
+            if crop is not None and crop.size > 0:
+                corrected_crop = np.maximum(0, crop.astype(np.float32) - bg)
+                max_px_value = float(np.max(corrected_crop))
+                max_px_per_ms = (max_px_value / exp_us) * 1000.0
+            if crop_raw is not None and crop_raw.size > 0:
+                max_px_raw = float(np.max(crop_raw))
+            elif crop is not None and crop.size > 0:
+                max_px_raw = float(np.max(crop))
 
             roi_metrics.append(
                 RoiMetric(
@@ -177,6 +200,8 @@ class MetricsComputer:
                     sum_gray=int(s_corr),
                     value_per_ms=float(v_ms),
                     max_pixel_per_ms=float(max_px_per_ms),
+                    max_pixel_value=float(max_px_value),
+                    max_pixel_raw=float(max_px_raw),
                     raw_sum=int(s_raw),
                     bg_mean=float(bg),
                 )
@@ -199,6 +224,8 @@ class MetricsComputer:
                 "rois": [m.to_dict() for m in roi_metrics],
                 "y_max_integral": dict(self._y_max_integral),
                 "y_max_pixel": dict(self._y_max_pixel),
+                "frame_max_pixel": float(frame_max),
+                "frame_max_pixel_raw": float(frame_max_raw),
             }
 
     def get_snapshot(self) -> Dict:
@@ -208,6 +235,8 @@ class MetricsComputer:
             snap["rois"] = [dict(r) for r in self._snapshot.get("rois", [])]
             snap["y_max_integral"] = dict(self._snapshot.get("y_max_integral", {}))
             snap["y_max_pixel"] = dict(self._snapshot.get("y_max_pixel", {}))
+            snap["frame_max_pixel"] = float(self._snapshot.get("frame_max_pixel", 0.0))
+            snap["frame_max_pixel_raw"] = float(self._snapshot.get("frame_max_pixel_raw", 0.0))
             return snap
 
     def reset_max_values(self, rid: str) -> None:

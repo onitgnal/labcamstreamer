@@ -420,6 +420,25 @@ def _get_roi_gray_image(rid: str, *, entry: Optional[Dict[str, object]] = None) 
     return np.asarray(roi_crop, dtype=np.float32).copy()
 
 
+def _get_roi_raw_gray_image(rid: str) -> Optional[np.ndarray]:
+    """Return the latest raw grayscale ROI (no background subtraction)."""
+    r = roi_registry.get(rid)
+    if r is None:
+        return None
+    raw = cam_service.get_latest_gray(raw=True)
+    if raw is None or getattr(raw, "size", 0) == 0:
+        return None
+    h_img, w_img = raw.shape[:2]
+    x0 = max(0, min(int(r.x), w_img - 1))
+    y0 = max(0, min(int(r.y), h_img - 1))
+    x1 = max(x0 + 1, min(int(r.x + r.w), w_img))
+    y1 = max(y0 + 1, min(int(r.y + r.h), h_img))
+    roi_crop = raw[y0:y1, x0:x1]
+    if roi_crop.size == 0:
+        return None
+    return np.asarray(roi_crop).copy()
+
+
 def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
     entry = beam_manager.get(rid)
     compute_mode = str(entry.get("compute") if entry else "none").lower()
@@ -707,9 +726,12 @@ def _metrics_loop():
     while True:
         try:
             cam_service.wait_for_frame_signal(timeout=0.5)
+            raw_gray = cam_service.get_latest_gray(raw=True)
             gray_processed = cam_service.get_latest_gray()
+            if (gray_processed is None or getattr(gray_processed, "size", 0) == 0) and raw_gray is not None:
+                gray_processed = raw_gray.copy()
             if gray_processed is None or getattr(gray_processed, "size", 0) == 0:
-                gray_processed = cam_service.get_latest_gray(raw=True)
+                continue
             exp = cam_service.get_exposure_us()
             size = cam_service.get_frame_size()
             if size != last_size:
@@ -717,7 +739,7 @@ def _metrics_loop():
                 roi_registry.clamp_all(size)
                 last_size = size
             rois = roi_registry.list()
-            metrics.update(gray_processed, exp, rois)
+            metrics.update(gray_processed, exp, rois, raw_gray=raw_gray)
             opts = _get_beam_options_copy()
             beam_manager.update(gray_processed, rois, opts)
         except Exception as e:
@@ -827,25 +849,21 @@ def _save_png_image(img: Optional[np.ndarray], path: Path) -> Optional[str]:
     return str(path)
 
 
-def _save_raw_roi_png(arr: Optional[np.ndarray], path: Path) -> Optional[str]:
+def _save_raw_roi_bmp(arr: Optional[np.ndarray], path: Path) -> Optional[str]:
     if arr is None:
         return None
     data = np.asarray(arr)
     if data.size == 0:
         return None
     path.parent.mkdir(parents=True, exist_ok=True)
-    if data.dtype in (np.uint8, np.uint16):
-        encode_input = data
-    else:
+    encode_input = data
+    if data.dtype != np.uint8:
         float_data = np.asarray(data, dtype=np.float32)
         float_data = np.nan_to_num(float_data, nan=0.0, posinf=0.0, neginf=0.0)
-        float_data = np.clip(float_data, 0.0, None)
-        max_val = float(np.max(float_data)) if float_data.size else 0.0
-        if max_val <= 0.0:
-            encode_input = np.zeros_like(float_data, dtype=np.uint16)
-        else:
-            encode_input = np.rint((float_data / max_val) * 65535.0).astype(np.uint16)
-    ok, buf = cv2.imencode(".png", encode_input)
+        encode_input = np.clip(np.rint(float_data), 0.0, 255.0).astype(np.uint8)
+    if encode_input.ndim == 3 and encode_input.shape[2] == 1:
+        encode_input = encode_input[:, :, 0]
+    ok, buf = cv2.imencode(".bmp", encode_input)
     if not ok:
         return None
     path.write_bytes(buf.tobytes())
@@ -1016,6 +1034,35 @@ def exposure():
         return jsonify({"value": int(applied)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/exposure/auto", methods=["POST"])
+def exposure_auto():
+    data = request.get_json(silent=True) or {}
+    target_fraction = 0.7
+    tolerance = 0.05
+    if "target_fraction" in data:
+        try:
+            target_fraction = float(data["target_fraction"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid target_fraction"}), 400
+    if "tolerance" in data:
+        try:
+            tolerance = float(data["tolerance"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid tolerance"}), 400
+    target_fraction = max(0.05, min(0.95, target_fraction))
+    tolerance = max(0.005, min(0.3, tolerance))
+    try:
+        result = cam_service.auto_adjust_exposure(
+            target_fraction=target_fraction,
+            tolerance=tolerance,
+        )
+        return jsonify(result)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+    except Exception as exc:
+        app.logger.error(f"Auto exposure failed: {exc}", exc_info=True)
+        return jsonify({"error": str(exc)}), 500
 
 # Colormap GET/POST
 @app.route("/colormap", methods=["GET", "POST"])
@@ -1266,7 +1313,21 @@ def caustic_add_point():
         cut_y_path = _save_png_image(cut_y_img, point_dir / "cut_y.png") or ""
 
     roi_gray = _get_roi_gray_image(roi_id, entry=entry)
-    raw_path = _save_raw_roi_png(roi_gray, point_dir / "raw.png") if roi_gray is not None else None
+    raw_roi = _get_roi_raw_gray_image(roi_id)
+    raw_source = raw_roi if raw_roi is not None else roi_gray
+    raw_path = None
+    if raw_source is not None:
+        z_unit = str(config.get("position_unit", "mm") or "").strip()
+        sign_prefix = "neg_" if z_value < 0 else ""
+        magnitude = abs(z_value)
+        z_numeric = f"{magnitude:.6g}"
+        suffix_parts = [sign_prefix + z_numeric if sign_prefix else z_numeric]
+        if z_unit:
+            suffix_parts.append(z_unit)
+        z_suffix = "_".join(part for part in suffix_parts if part)
+        z_slug = _SAFE_FILENAME_RE.sub('_', z_suffix).strip('_') or "z"
+        raw_filename = f"raw_{z_slug}.bmp"
+        raw_path = _save_raw_roi_bmp(raw_source, point_dir / raw_filename)
     pixel_size_m = _extract_pixel_size_m(entry)
 
     timestamp_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -1356,7 +1417,9 @@ def caustic_image(point_id: str, kind: str):
     fs_path = Path(path_str)
     if not fs_path.exists():
         return jsonify({"error": "Image unavailable"}), 404
-    return send_file(fs_path, mimetype="image/png")
+    suffix = fs_path.suffix.lower()
+    mimetype = "image/bmp" if suffix == ".bmp" else "image/png"
+    return send_file(fs_path, mimetype=mimetype)
 
 
 # ROI mini-streams (~10 Hz)

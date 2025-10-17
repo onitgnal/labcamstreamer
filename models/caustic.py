@@ -364,7 +364,7 @@ class CausticManager:
             profile_dst = images_dir / f"{prefix}_profile.png"
             cut_x_dst = images_dir / f"{prefix}_cut_x.png"
             cut_y_dst = images_dir / f"{prefix}_cut_y.png"
-            raw_dst = images_dir / f"{prefix}_raw.png"
+            raw_dst = images_dir / f"{prefix}_raw.bmp"
 
             has_profile = False
             has_cut_x = False

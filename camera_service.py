@@ -381,18 +381,26 @@ class CameraService:
                 min_v, max_v = feat.get_range()
             except (VmbFeatureError, TypeError, ValueError):
                 min_v, max_v = 10.0, 1_000_000.0
+            min_v = float(min_v)
+            max_v = float(max_v)
 
             inc = None
             try:
-                inc = feat.get_increment()
-            except (VmbFeatureError, AttributeError):
+                inc = float(feat.get_increment())
+            except (VmbFeatureError, AttributeError, TypeError, ValueError):
                 inc = None
 
             ui_min, ui_max, ui_step = 1000, 50000, 1000
-            target = max(ui_min, min(ui_max, int(requested_us)))
-            target = (target // ui_step) * ui_step
+            requested = float(requested_us)
 
-            target = _nearest_with_increment(float(target), float(min_v), float(max_v), float(inc) if inc else None)
+            target = max(min_v, min(max_v, requested))
+            target = _nearest_with_increment(target, min_v, max_v, inc)
+
+            if requested >= ui_min:
+                snapped = max(float(ui_min), min(float(ui_max), requested))
+                snapped = (int(snapped) // ui_step) * ui_step
+                snapped = max(min_v, min(max_v, float(snapped)))
+                target = _nearest_with_increment(snapped, min_v, max_v, inc)
 
             feat.set(target)
             current = feat.get()
@@ -403,6 +411,170 @@ class CameraService:
                     return int(current)
                 except Exception:
                     return 0
+
+    def _get_gain_auto_feature(self):
+        if not self._cam:
+            return None
+        try:
+            feat = self._cam.get_feature_by_name("GainAuto")
+        except (AttributeError, VmbFeatureError):
+            return None
+        try:
+            feat.get()
+        except Exception:
+            return None
+        return feat
+
+    def _trigger_gain_auto_once(self) -> bool:
+        feat = self._get_gain_auto_feature()
+        if feat is None:
+            return False
+        try:
+            candidates = []
+            try:
+                candidates = feat.get_values()
+            except Exception:
+                candidates = []
+            target = None
+            lowered = {str(v).lower(): v for v in candidates}
+            if "once" in lowered:
+                target = lowered["once"]
+            elif not candidates:
+                target = "Once"
+            if target is None:
+                return False
+            feat.set(target)
+            return True
+        except Exception:
+            return False
+
+    def auto_adjust_exposure(self, target_fraction: float = 0.7, tolerance: float = 0.05) -> Dict[str, object]:
+        """
+        Adjust exposure to target a peak intensity fraction of the sensor range.
+        Optionally falls back to triggering camera gain auto if exposure limits are hit.
+        """
+        if not self.is_running():
+            raise RuntimeError("Camera must be running to auto-adjust exposure.")
+
+        raw_frame = self.get_latest_gray(raw=True)
+        processed_frame = self.get_latest_gray()
+
+        frame = processed_frame if processed_frame is not None and getattr(processed_frame, "size", 0) > 0 else raw_frame
+        if frame is None or getattr(frame, "size", 0) == 0:
+            raise RuntimeError("No frame available for auto exposure.")
+
+        frame_arr = np.asarray(frame)
+        frame_peak = float(np.max(frame_arr))
+        if frame_peak <= 0.0 or not np.isfinite(frame_peak):
+            raise RuntimeError("Frame signal too low for auto exposure.")
+
+        if np.issubdtype(frame_arr.dtype, np.integer):
+            frame_scale = float(np.iinfo(frame_arr.dtype).max)
+        else:
+            frame_scale = float(np.max(np.abs(frame_arr.astype(np.float32))))
+            if not np.isfinite(frame_scale) or frame_scale <= 0.0:
+                frame_scale = frame_peak
+        frame_fraction = frame_peak / max(frame_scale, 1e-6)
+
+        raw_peak = frame_peak
+        raw_scale = frame_scale
+        if raw_frame is not None and getattr(raw_frame, "size", 0) > 0:
+            raw_arr = np.asarray(raw_frame)
+            raw_peak = float(np.max(raw_arr))
+            if np.issubdtype(raw_arr.dtype, np.integer):
+                raw_scale = float(np.iinfo(raw_arr.dtype).max)
+            else:
+                raw_scale = float(np.max(np.abs(raw_arr.astype(np.float32))))
+                if not np.isfinite(raw_scale) or raw_scale <= 0.0:
+                    raw_scale = raw_peak
+        raw_fraction = raw_peak / max(raw_scale, 1e-6)
+
+        current_exp = max(1, self.get_exposure_us())
+        min_exp = 10.0
+        max_exp = 1_000_000.0
+        inc = None
+        try:
+            feat = self._get_exposure_feature()
+            try:
+                min_exp, max_exp = feat.get_range()
+            except (VmbFeatureError, TypeError, ValueError):
+                min_exp, max_exp = 10.0, 1_000_000.0
+            try:
+                inc = feat.get_increment()
+            except (VmbFeatureError, AttributeError):
+                inc = None
+        except Exception:
+            feat = None
+
+        min_exp = float(min_exp)
+        max_exp = float(max_exp)
+
+        factor = target_fraction / max(raw_fraction, 1e-6)
+        unclamped_exp = float(current_exp) * factor
+        desired_exp = unclamped_exp
+        desired_exp = max(min_exp, min(max_exp, desired_exp))
+        if inc:
+            desired_exp = _nearest_with_increment(desired_exp, min_exp, max_exp, inc)
+        desired_int = int(round(desired_exp))
+
+        applied = self.set_exposure_us(desired_int)
+        changed = applied != current_exp
+        tol = inc if inc else 1.0
+        reduction_requested = factor < 0.999
+        increase_requested = factor > 1.001
+        clamped_lower = unclamped_exp <= min_exp + tol
+        clamped_upper = unclamped_exp >= max_exp - tol
+        hit_lower = clamped_lower or (
+            reduction_requested and (float(applied) <= min_exp + tol or not changed)
+        )
+        hit_upper = clamped_upper or (
+            increase_requested and (float(applied) >= max_exp - tol or not changed)
+        )
+
+        expected_fraction = raw_fraction * (float(applied) / max(1.0, float(current_exp)))
+        expected_fraction = min(1.0, expected_fraction)
+        delta = abs(expected_fraction - target_fraction)
+
+        gain_auto_feat = self._get_gain_auto_feature()
+        gain_auto_available = gain_auto_feat is not None
+        gain_triggered = False
+
+        if delta > tolerance and gain_auto_available and (hit_lower or hit_upper):
+            gain_triggered = self._trigger_gain_auto_once()
+
+        if delta <= tolerance:
+            message = "Exposure already within target range."
+        elif changed:
+            message = (
+                f"Exposure adjusted from {current_exp}us to {applied}us "
+                f"(raw peak {raw_peak:.1f}/{raw_scale:.0f})."
+            )
+        else:
+            limit = "minimum" if hit_lower else "maximum"
+            message = (
+                f"Exposure change limited by camera {limit} (raw peak {raw_peak:.1f}/{raw_scale:.0f})."
+            )
+        if gain_triggered:
+            message += " Gain auto was triggered."
+        elif gain_auto_available and delta > tolerance and (hit_lower or hit_upper):
+            message += " Gain auto unavailable or failed."
+
+        return {
+            "value": int(applied),
+            "previous_value": int(current_exp),
+            "target_fraction": float(target_fraction),
+            "frame_peak": float(frame_peak),
+            "frame_peak_fraction": float(frame_fraction),
+            "frame_peak_raw": float(raw_peak),
+            "frame_peak_raw_fraction": float(raw_fraction),
+            "expected_fraction": float(expected_fraction),
+            "changed": bool(changed),
+            "gain_auto_available": bool(gain_auto_available),
+            "gain_auto_triggered": bool(gain_triggered),
+            "message": message,
+            "min_exposure": float(min_exp),
+            "max_exposure": float(max_exp),
+        }
 
     # ---------- Colormap ----------
 

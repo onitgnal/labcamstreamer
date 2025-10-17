@@ -15,6 +15,7 @@
   const closeModalButton = backgroundSubtractionModal.querySelector('.close-button');
   const startBgSubtractionBtn = qs('#startBgSubtraction');
   const numFramesInput = qs('#numFrames');
+  const autoExposureBtn = qs('#autoExposureBtn');
 
   const expSlider = qs('#expSlider');
   const expLabel = qs('#expLabel');
@@ -31,6 +32,7 @@
 
   const statsExposure = qs('#statsExposure');
   const statsFps = qs('#statsFps');
+  const statsMax = qs('#statsMaxPixel');
 
   const barPanel = qs('#barPanel');
   const roiGridPanel = qs('#roiGridPanel');
@@ -93,6 +95,7 @@
   const roiImageTimers = new Map(); // Map<roiId, { profile:number, cuts:number }>
   let causticConfigTimer = null;
 
+  const SATURATION_THRESHOLD = 250;
   // ----- REST helpers -----
   async function logToServer(level, message, data) {
     try {
@@ -134,6 +137,31 @@
       logToServer('info', 'Reset max for ROI', { roiId });
     } catch(e) {
       logToServer('error', 'Failed to reset max for ROI', { roiId, error: e.toString() });
+    }
+  }
+
+  async function runAutoExposure() {
+    if (!autoExposureBtn) return;
+    const originalText = autoExposureBtn.textContent;
+    autoExposureBtn.disabled = true;
+    autoExposureBtn.textContent = 'Auto...';
+    try {
+      const res = await postJSON('/exposure/auto', {});
+      if (typeof res?.value === 'number') {
+        expSlider.value = String(res.value);
+        expLabel.textContent = String(res.value);
+      }
+      if (res?.message) {
+        autoExposureBtn.setAttribute('title', res.message);
+        logToServer('info', 'Auto exposure result', res);
+      }
+    } catch (err) {
+      const message = err?.message || err?.toString?.() || 'Unknown error';
+      logToServer('error', 'Auto exposure failed', { error: message });
+      alert(`Auto exposure failed: ${message}`);
+    } finally {
+      autoExposureBtn.textContent = originalText;
+      autoExposureBtn.disabled = false;
     }
   }
 
@@ -1170,6 +1198,27 @@
       const fps = snap?.fps ?? 0;
       statsExposure.textContent = `exp: ${exp}`;
       statsFps.textContent = `fps: ${fps.toFixed(1)}`;
+      if (statsMax) {
+        const peakRaw = Number.isFinite(snap?.frame_max_pixel_raw) ? snap.frame_max_pixel_raw : null;
+        const peakProcessed = Number.isFinite(snap?.frame_max_pixel) ? snap.frame_max_pixel : null;
+        if (peakRaw !== null) {
+          const peakRawRounded = Math.round(peakRaw);
+          const peakProcessedRounded = peakProcessed !== null ? Math.round(peakProcessed) : null;
+          statsMax.textContent = peakProcessedRounded !== null && Math.abs(peakProcessedRounded - peakRawRounded) > 1
+            ? `peak: ${peakRawRounded} raw / ${peakProcessedRounded} proc`
+            : `peak: ${peakRawRounded}`;
+          statsMax.classList.toggle('warn', peakRawRounded >= SATURATION_THRESHOLD);
+          if (peakProcessedRounded !== null) {
+            statsMax.title = `Raw peak ${peakRawRounded}, processed ${peakProcessedRounded}`;
+          } else {
+            statsMax.title = `Raw peak ${peakRawRounded}`;
+          }
+        } else {
+          statsMax.textContent = 'peak: -';
+          statsMax.classList.remove('warn');
+          statsMax.removeAttribute('title');
+        }
+      }
 
       const hasRois = (snap?.rois?.length || state.rois.length) > 0;
       roiGridPanel.hidden = true;
@@ -1196,6 +1245,9 @@
       const card = document.createElement('div');
       card.className = 'roi-card';
       if (state.selectedId === r.id) card.style.outline = '2px solid var(--accent)';
+      const peakRaw = Number.isFinite(m?.max_pixel_raw) ? Math.round(m.max_pixel_raw) : null;
+      const isSaturated = peakRaw !== null && peakRaw >= SATURATION_THRESHOLD;
+      card.classList.toggle('saturated', isSaturated);
 
       const head = document.createElement('div');
       head.className = 'head';
@@ -1228,9 +1280,27 @@
 
       const metrics = document.createElement('div');
       metrics.className = 'metrics';
-      const sum = m ? m.sum_gray : '-';
-      const vms = m ? m.value_per_ms.toFixed(1) : '-';
-      metrics.innerHTML = `<span>Sum: ${sum}</span><span>Value/ms: ${vms}</span>`;
+      const sumSpan = document.createElement('span');
+      sumSpan.textContent = `Sum: ${m ? m.sum_gray : '-'}`;
+      const vmsSpan = document.createElement('span');
+      vmsSpan.textContent = `Value/ms: ${m ? m.value_per_ms.toFixed(1) : '-'}`;
+      const peakSpan = document.createElement('span');
+      if (peakRaw !== null) {
+        peakSpan.textContent = `Peak: ${peakRaw}`;
+        peakSpan.classList.toggle('warn', isSaturated);
+        if (m && Number.isFinite(m.max_pixel_per_ms)) {
+          peakSpan.title = `Exposure-normalized peak: ${m.max_pixel_per_ms.toFixed(1)}/ms`;
+        } else {
+          peakSpan.removeAttribute('title');
+        }
+      } else {
+        peakSpan.textContent = 'Peak: -';
+        peakSpan.classList.remove('warn');
+        peakSpan.removeAttribute('title');
+      }
+      metrics.appendChild(sumSpan);
+      metrics.appendChild(vmsSpan);
+      metrics.appendChild(peakSpan);
 
       card.appendChild(head);
       card.appendChild(btnGroup);
@@ -1263,7 +1333,22 @@
 
       const header = document.createElement('div');
       header.className = 'header';
-      header.innerHTML = `<span class="title">${r.id}</span><span class="dims">${r.w}x${r.h}</span>`;
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'title';
+      titleSpan.textContent = r.id;
+      const dimsSpan = document.createElement('span');
+      dimsSpan.className = 'dims';
+      dimsSpan.textContent = `${r.w}x${r.h}`;
+      const headerGroup = document.createElement('div');
+      headerGroup.className = 'id-group';
+      headerGroup.appendChild(titleSpan);
+      headerGroup.appendChild(dimsSpan);
+      const peakSpan = document.createElement('span');
+      peakSpan.className = 'peak';
+      peakSpan.dataset.role = 'peak';
+      peakSpan.textContent = 'peak: -';
+      header.appendChild(headerGroup);
+      header.appendChild(peakSpan);
 
       const plots = document.createElement('div');
       plots.className = 'plots';
@@ -1346,21 +1431,48 @@
     const yMaxMap = state.metrics.y_max_integral || {};
 
     for (const r of state.rois) {
-      const plot = perRoiGrid.querySelector(`.per-roi-card[data-roi="${r.id}"] .roi-integration-plot`);
+      const card = perRoiGrid.querySelector(`.per-roi-card[data-roi="${r.id}"]`);
+      if (!card) continue;
+      const plot = card.querySelector('.roi-integration-plot');
       if (!plot) continue;
 
       const m = metricsMap.get(r.id);
       const bar = plot.querySelector('.bar');
       const label = plot.querySelector('.label');
+      const peakEl = card.querySelector('.header .peak');
 
       if (m) {
         const yMax = yMaxMap[r.id] || 1.0;
         const pct = (m.value_per_ms / Math.max(1.0, yMax)) * 100;
         bar.style.height = `${Math.min(100, Math.max(0, pct))}%`;
         label.textContent = `${m.value_per_ms.toFixed(1)}/ms`;
+        if (peakEl) {
+          if (Number.isFinite(m.max_pixel_raw)) {
+            const peakRaw = Math.round(m.max_pixel_raw);
+            peakEl.textContent = `peak: ${peakRaw}`;
+            peakEl.classList.toggle('warn', peakRaw >= SATURATION_THRESHOLD);
+            card.classList.toggle('saturated', peakRaw >= SATURATION_THRESHOLD);
+            if (Number.isFinite(m.max_pixel_per_ms)) {
+              peakEl.title = `Exposure-normalized peak: ${m.max_pixel_per_ms.toFixed(1)}/ms`;
+            } else {
+              peakEl.removeAttribute('title');
+            }
+          } else {
+            peakEl.textContent = 'peak: -';
+            peakEl.classList.remove('warn');
+            peakEl.removeAttribute('title');
+            card.classList.remove('saturated');
+          }
+        }
       } else {
         bar.style.height = '0%';
         label.textContent = '-';
+        if (peakEl) {
+          peakEl.textContent = 'peak: -';
+          peakEl.classList.remove('warn');
+          peakEl.removeAttribute('title');
+        }
+        card.classList.remove('saturated');
       }
     }
   }
@@ -1370,8 +1482,18 @@
   function drawOverlay() {
     const { width, height } = canvas;
     ctx.clearRect(0, 0, width, height);
+    const saturated = new Set();
+    if (state.metrics?.rois) {
+      for (const m of state.metrics.rois) {
+        if (Number.isFinite(m.max_pixel_raw) && m.max_pixel_raw >= SATURATION_THRESHOLD) {
+          saturated.add(m.id);
+        }
+      }
+    }
     for (const r of state.rois) {
-      drawRoi(r, r.id === state.selectedId ? '#50e3c2' : '#4a90e2');
+      const isSelected = r.id === state.selectedId;
+      const color = saturated.has(r.id) ? '#ff5c6c' : (isSelected ? '#50e3c2' : '#4a90e2');
+      drawRoi(r, color);
     }
     if (state.preview) {
       ctx.save();
@@ -1577,6 +1699,18 @@
         cmSelect.value = cm.value;
       }
     } catch (_) {}
+    if (autoExposureBtn) {
+      autoExposureBtn.disabled = !cameraToggle.checked;
+    }
+  }
+
+  if (autoExposureBtn) {
+    autoExposureBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      if (!autoExposureBtn.disabled) {
+        runAutoExposure();
+      }
+    });
   }
 
   expSlider.addEventListener('input', () => { expLabel.textContent = String(expSlider.value); });
@@ -1603,11 +1737,17 @@
     const enabled = cameraToggle.checked;
     const cameraId = cameraSelect.value;
     cameraSelect.disabled = enabled; // Disable selector when camera is on
+    if (autoExposureBtn) {
+      autoExposureBtn.disabled = !enabled;
+    }
     try {
       const res = await postJSON('/camera', { enabled, camera_id: cameraId });
       const success = !!res.enabled;
       cameraToggle.checked = success;
       cameraSelect.disabled = success;
+      if (autoExposureBtn) {
+        autoExposureBtn.disabled = !success;
+      }
       stream.src = success ? '/video_feed?ts=' + Date.now() : '';
       if (!success && res.error) {
         logToServer('error', 'Failed to toggle camera', { error: res.error });
@@ -1617,6 +1757,9 @@
       logToServer('error', 'Failed to toggle camera', { error: e.toString() });
       cameraToggle.checked = !enabled;
       cameraSelect.disabled = !enabled;
+      if (autoExposureBtn) {
+        autoExposureBtn.disabled = !cameraToggle.checked;
+      }
     }
   });
 

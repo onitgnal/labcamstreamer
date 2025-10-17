@@ -23,10 +23,13 @@
             <span>Enabled</span>
             <input id="cameraToggle" type="checkbox" />
           </label>
-        <label class="row space">
-          <span>Background Subtraction</span>
-          <input id="backgroundSubtractionToggle" type="checkbox" />
-        </label>
+        <div class="row space background-controls">
+          <label class="row background-toggle">
+            <span>Background Subtraction</span>
+            <input id="backgroundSubtractionToggle" type="checkbox" />
+          </label>
+          <button id="autoExposureBtn" class="secondary" type="button" title="Auto adjust exposure to avoid saturation">Auto exposure</button>
+        </div>
       </section>
 
       <section class="panel">
@@ -153,6 +156,7 @@
           <div class="stats mono">
             <span id="statsExposure">exp: -</span>
             <span id="statsFps">fps: -</span>
+            <span id="statsMaxPixel">peak: -</span>
           </div>
         </div>
         <div id="liveContainer" class="live-container">
