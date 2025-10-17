@@ -1381,17 +1381,27 @@ def caustic_save():
     fallback = f"caustic_{timestamp}"
     base = _sanitize_filename(base_param, fallback)
 
-    target_dir = EXPORTS_DIR / base
-    result = caustic_manager.export_dataset(target_dir, clean=True)
+    autosave_latest = CAUSTIC_AUTOSAVE_DIR / "latest"
+    try:
+        export_meta = caustic_manager.export_dataset(autosave_latest, clean=True)
+        export_root = Path(export_meta.get("path", autosave_latest))
+    except Exception as exc:
+        app.logger.error(f"Failed to refresh caustic autosave: {exc}", exc_info=True)
+        return jsonify({"error": "Caustic autosave unavailable"}), 500
+
+    if not export_root.exists():
+        return jsonify({"error": "No caustic data available"}), 404
+
+    files = [p for p in export_root.rglob("*") if p.is_file()]
+    if not files:
+        return jsonify({"error": "No caustic data available"}), 404
 
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        export_root = Path(result["path"])
         base_folder = base
-        for file_path in export_root.rglob("*"):
-            if file_path.is_file():
-                arcname = f"{base_folder}/{file_path.relative_to(export_root)}"
-                zf.write(file_path, arcname)
+        for file_path in files:
+            arcname = f"{base_folder}/{file_path.relative_to(export_root)}"
+            zf.write(file_path, arcname)
     mem.seek(0)
 
     download_name = f"{base}.zip"
