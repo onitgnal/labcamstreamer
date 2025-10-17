@@ -179,6 +179,15 @@ body{
   color:var(--text);
   cursor:pointer;
 }
+.secondary.auto-active{
+  border-color:var(--accent);
+  background:linear-gradient(90deg, rgba(74,144,226,0.24) 0%, rgba(74,144,226,0.1) 100%);
+  color:var(--accent);
+  font-weight:600;
+}
+.secondary.auto-active:hover{
+  filter:brightness(1.05);
+}
 .secondary:hover{ filter:brightness(1.08); }
 .secondary:disabled{
   opacity:0.55;

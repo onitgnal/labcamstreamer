@@ -116,6 +116,11 @@
   let causticImportActive = false;
 
   const SATURATION_THRESHOLD = 250;
+  const AUTO_EXPOSURE_TARGET = 0.9;
+  const AUTO_EXPOSURE_TOLERANCE = 0.02;
+  let autoExposureEnabled = false;
+  let autoExposureLoopTimer = null;
+  let autoExposureBusy = false;
   // ----- REST helpers -----
   async function logToServer(level, message, data) {
     try {
@@ -458,30 +463,162 @@
       showToast(`Upload failed to start: ${parseServerError(error)}`, { variant: 'error' });
     }
   }
-  async function runAutoExposure() {
+  function updateExposureWidgetsDisabledState() {
+    if (!expSlider) return;
+    const shouldDisable = autoExposureEnabled || (autoExposureBtn && autoExposureBtn.disabled);
+    expSlider.disabled = shouldDisable;
+  }
+
+  function updateAutoExposureUI() {
     if (!autoExposureBtn) return;
+    const label = autoExposureEnabled ? 'Auto exposure: On' : 'Auto exposure: Off';
+    autoExposureBtn.textContent = label;
+    autoExposureBtn.classList.toggle('auto-active', autoExposureEnabled);
+    autoExposureBtn.setAttribute('aria-pressed', autoExposureEnabled ? 'true' : 'false');
+    if (autoExposureBtn.disabled) {
+      autoExposureBtn.setAttribute('title', 'Auto exposure unavailable while the camera is off.');
+    } else if (autoExposureEnabled) {
+      const current = autoExposureBtn.getAttribute('title');
+      autoExposureBtn.setAttribute(
+        'title',
+        current || 'Auto exposure is keeping the peak near 90%. Click to stop.',
+      );
+    } else {
+      autoExposureBtn.setAttribute('title', 'Enable auto exposure to keep the peak near 90%.');
+    }
+  }
+
+  function stopAutoExposureLoop() {
+    if (autoExposureLoopTimer) {
+      clearTimeout(autoExposureLoopTimer);
+      autoExposureLoopTimer = null;
+    }
+  }
+
+  function scheduleAutoExposureLoop(delay = 900) {
+    stopAutoExposureLoop();
+    autoExposureLoopTimer = setTimeout(autoExposureLoop, delay);
+  }
+
+  async function runAutoExposure(options = {}) {
+    if (!autoExposureBtn) return null;
+    const {
+      manual = false,
+      targetFraction = AUTO_EXPOSURE_TARGET,
+      tolerance = AUTO_EXPOSURE_TOLERANCE,
+    } = options;
+
+    const prevDisabled = autoExposureBtn.disabled;
     const originalText = autoExposureBtn.textContent;
-    autoExposureBtn.disabled = true;
-    autoExposureBtn.textContent = 'Auto...';
+    if (manual) {
+      autoExposureBtn.disabled = true;
+      autoExposureBtn.textContent = 'Auto...';
+    }
     try {
-      const res = await postJSON('/exposure/auto', {});
+      const res = await postJSON('/exposure/auto', {
+        target_fraction: targetFraction,
+        tolerance,
+      });
       if (typeof res?.value === 'number') {
         expSlider.value = String(res.value);
         expLabel.textContent = String(res.value);
       }
       if (res?.message) {
         autoExposureBtn.setAttribute('title', res.message);
+      }
+      if (manual) {
         logToServer('info', 'Auto exposure result', res);
       }
+      return res;
     } catch (err) {
-      const message = err?.message || err?.toString?.() || 'Unknown error';
-      logToServer('error', 'Auto exposure failed', { error: message });
-      alert(`Auto exposure failed: ${message}`);
+      const friendly = parseServerError(err);
+      if (manual) {
+        logToServer('error', 'Auto exposure failed', { error: friendly });
+        alert(`Auto exposure failed: ${friendly}`);
+      } else {
+        logToServer('warn', 'Auto exposure loop error', { error: friendly });
+      }
+      throw err;
     } finally {
-      autoExposureBtn.textContent = originalText;
-      autoExposureBtn.disabled = false;
+      if (manual) {
+        autoExposureBtn.textContent = originalText;
+        autoExposureBtn.disabled = prevDisabled;
+        updateAutoExposureUI();
+        updateExposureWidgetsDisabledState();
+      }
     }
   }
+
+  async function autoExposureLoop() {
+    stopAutoExposureLoop();
+    if (!autoExposureEnabled || autoExposureBusy || (autoExposureBtn && autoExposureBtn.disabled)) {
+      updateExposureWidgetsDisabledState();
+      return;
+    }
+    autoExposureBusy = true;
+    try {
+      const res = await runAutoExposure({
+        manual: false,
+        targetFraction: AUTO_EXPOSURE_TARGET,
+        tolerance: AUTO_EXPOSURE_TOLERANCE,
+      });
+      if (res?.message) {
+        autoExposureBtn.setAttribute('title', res.message);
+      }
+    } catch (error) {
+      const friendly = parseServerError(error);
+      autoExposureBtn.setAttribute('title', `Auto exposure stopped: ${friendly}`);
+      showToast(`Auto exposure stopped: ${friendly}`, { variant: 'error', duration: 6000 });
+      setAutoExposureActive(false);
+      autoExposureBusy = false;
+      return;
+    }
+    autoExposureBusy = false;
+    if (autoExposureEnabled) {
+      scheduleAutoExposureLoop(900);
+    }
+  }
+
+  function setAutoExposureActive(active) {
+    const next = !!active && !(autoExposureBtn && autoExposureBtn.disabled);
+    if (next === autoExposureEnabled) {
+      if (autoExposureEnabled && !autoExposureLoopTimer && !autoExposureBusy) {
+        scheduleAutoExposureLoop(900);
+      }
+      return;
+    }
+    autoExposureEnabled = next;
+    if (!autoExposureEnabled) {
+      stopAutoExposureLoop();
+    } else if (!autoExposureBusy) {
+      autoExposureLoop();
+    }
+    updateAutoExposureUI();
+    updateExposureWidgetsDisabledState();
+    logToServer('info', `Auto exposure ${autoExposureEnabled ? 'enabled' : 'disabled'}`, {
+      target: AUTO_EXPOSURE_TARGET,
+      tolerance: AUTO_EXPOSURE_TOLERANCE,
+    });
+  }
+
+  function setAutoExposureDisabled(disabled) {
+    if (!autoExposureBtn) return;
+    const nextDisabled = !!disabled;
+    autoExposureBtn.disabled = nextDisabled;
+    if (nextDisabled) {
+      autoExposureBtn.setAttribute('title', 'Auto exposure unavailable while the camera is off.');
+      if (autoExposureEnabled) {
+        setAutoExposureActive(false);
+        return;
+      }
+    }
+    updateAutoExposureUI();
+    updateExposureWidgetsDisabledState();
+  }
+
+  updateAutoExposureUI();
+  updateExposureWidgetsDisabledState();
+  setAutoExposureDisabled(!(cameraToggle && cameraToggle.checked));
 
 
 
@@ -2017,17 +2154,14 @@
         cmSelect.value = cm.value;
       }
     } catch (_) {}
-    if (autoExposureBtn) {
-      autoExposureBtn.disabled = !cameraToggle.checked;
-    }
+    setAutoExposureDisabled(!cameraToggle.checked);
   }
 
   if (autoExposureBtn) {
     autoExposureBtn.addEventListener('click', (ev) => {
       ev.preventDefault();
-      if (!autoExposureBtn.disabled) {
-        runAutoExposure();
-      }
+      if (autoExposureBtn.disabled) return;
+      setAutoExposureActive(!autoExposureEnabled);
     });
   }
 
@@ -2055,17 +2189,13 @@
     const enabled = cameraToggle.checked;
     const cameraId = cameraSelect.value;
     cameraSelect.disabled = enabled; // Disable selector when camera is on
-    if (autoExposureBtn) {
-      autoExposureBtn.disabled = !enabled;
-    }
+    setAutoExposureDisabled(!enabled);
     try {
       const res = await postJSON('/camera', { enabled, camera_id: cameraId });
       const success = !!res.enabled;
       cameraToggle.checked = success;
       cameraSelect.disabled = success;
-      if (autoExposureBtn) {
-        autoExposureBtn.disabled = !success;
-      }
+      setAutoExposureDisabled(!success);
       stream.src = success ? '/video_feed?ts=' + Date.now() : '';
       if (!success && res.error) {
         logToServer('error', 'Failed to toggle camera', { error: res.error });
@@ -2075,9 +2205,7 @@
       logToServer('error', 'Failed to toggle camera', { error: e.toString() });
       cameraToggle.checked = !enabled;
       cameraSelect.disabled = !enabled;
-      if (autoExposureBtn) {
-        autoExposureBtn.disabled = !cameraToggle.checked;
-      }
+      setAutoExposureDisabled(!cameraToggle.checked);
     }
   });
 
