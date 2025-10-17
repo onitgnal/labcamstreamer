@@ -869,44 +869,98 @@ def _build_profile_image_from_analysis(
             g_major = g_minor = None
 
         h_img, w_img = img.shape[:2]
-        t = np.linspace(0.0, 2.0 * np.pi, 361, dtype=np.float32)
+        target_h = 240.0
+        scale = target_h / max(1.0, float(h_img))
+        scaled_w = max(1, int(round(w_img * scale)))
+        scaled_h = int(round(target_h))
 
+        t = np.linspace(0.0, 2.0 * np.pi, 361, dtype=np.float32)
         major_color, minor_color = _COLOR_X_ISO, _COLOR_Y_ISO
         if ry_iso > rx_iso:
             major_color, minor_color = _COLOR_Y_ISO, _COLOR_X_ISO
+
+        iso_overlay = None
+        gauss_overlay = None
 
         if compute in ("both", "second"):
             ex = cx + major_r * np.cos(t) * c - minor_r * np.sin(t) * s
             ey = cy + major_r * np.cos(t) * s + minor_r * np.sin(t) * c
             ellipse_pts = np.stack([ex, ey], axis=1)
             ellipse_pts = np.nan_to_num(ellipse_pts, nan=0.0)
-            ellipse_pts[:, 0] = np.clip(ellipse_pts[:, 0], 0, w_img - 1)
-            ellipse_pts[:, 1] = np.clip(ellipse_pts[:, 1], 0, h_img - 1)
-            ellipse_pts = np.round(ellipse_pts).astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(img, [ellipse_pts], True, _COLOR_ISO_ELLIPSE, 2, cv2.LINE_AA)
+            ellipse_pts[:, 0] = np.clip(ellipse_pts[:, 0], 0.0, max(0.0, w_img - 1.0))
+            ellipse_pts[:, 1] = np.clip(ellipse_pts[:, 1], 0.0, max(0.0, h_img - 1.0))
 
-            major_pt1 = (int(np.clip(round(cx - major_r * c), 0, w_img - 1)), int(np.clip(round(cy - major_r * s), 0, h_img - 1)))
-            major_pt2 = (int(np.clip(round(cx + major_r * c), 0, w_img - 1)), int(np.clip(round(cy + major_r * s), 0, h_img - 1)))
-            minor_pt1 = (int(np.clip(round(cx + minor_r * s), 0, w_img - 1)), int(np.clip(round(cy - minor_r * c), 0, h_img - 1)))
-            minor_pt2 = (int(np.clip(round(cx - minor_r * s), 0, w_img - 1)), int(np.clip(round(cy + minor_r * c), 0, h_img - 1)))
-            cv2.line(img, major_pt1, major_pt2, major_color, 2, cv2.LINE_AA)
-            cv2.line(img, minor_pt1, minor_pt2, minor_color, 2, cv2.LINE_AA)
+            major_pt1 = (
+                float(np.clip(cx - major_r * c, 0.0, max(0.0, w_img - 1.0))),
+                float(np.clip(cy - major_r * s, 0.0, max(0.0, h_img - 1.0))),
+            )
+            major_pt2 = (
+                float(np.clip(cx + major_r * c, 0.0, max(0.0, w_img - 1.0))),
+                float(np.clip(cy + major_r * s, 0.0, max(0.0, h_img - 1.0))),
+            )
+            minor_pt1 = (
+                float(np.clip(cx + minor_r * s, 0.0, max(0.0, w_img - 1.0))),
+                float(np.clip(cy - minor_r * c, 0.0, max(0.0, h_img - 1.0))),
+            )
+            minor_pt2 = (
+                float(np.clip(cx - minor_r * s, 0.0, max(0.0, w_img - 1.0))),
+                float(np.clip(cy + minor_r * c, 0.0, max(0.0, h_img - 1.0))),
+            )
+
+            iso_overlay = {
+                "ellipse": ellipse_pts,
+                "major": (major_pt1, major_pt2, major_color),
+                "minor": (minor_pt1, minor_pt2, minor_color),
+            }
 
         if compute in ("both", "gauss") and g_major is not None and g_minor is not None:
             gx = cx + g_major * np.cos(t) * c - g_minor * np.sin(t) * s
             gy = cy + g_major * np.cos(t) * s + g_minor * np.sin(t) * c
             g_pts = np.stack([gx, gy], axis=1)
             g_pts = np.nan_to_num(g_pts, nan=0.0)
-            g_pts[:, 0] = np.clip(g_pts[:, 0], 0, w_img - 1)
-            g_pts[:, 1] = np.clip(g_pts[:, 1], 0, h_img - 1)
-            g_pts = np.round(g_pts).astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(img, [g_pts], True, _COLOR_GAUSS, 2, cv2.LINE_AA)
+            g_pts[:, 0] = np.clip(g_pts[:, 0], 0.0, max(0.0, w_img - 1.0))
+            g_pts[:, 1] = np.clip(g_pts[:, 1], 0.0, max(0.0, h_img - 1.0))
+            gauss_overlay = g_pts
 
-        target_h = 240.0
-        scale = target_h / max(1.0, float(h_img))
-        scaled_w = max(1, int(round(w_img * scale)))
-        scaled_h = int(round(target_h))
-        return cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
+        img_scaled = cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
+
+        if iso_overlay is not None or gauss_overlay is not None:
+
+            def _overlay_thickness(scale_factor: float) -> int:
+                if scale_factor <= 0.0:
+                    return 1
+                desired = 2.0 / max(np.sqrt(scale_factor), 1e-6)
+                return max(1, min(4, int(round(desired))))
+
+            def _scale_point(pt: Tuple[float, float]) -> Tuple[int, int]:
+                x = int(np.clip(round(pt[0] * scale), 0, max(0, scaled_w - 1)))
+                y = int(np.clip(round(pt[1] * scale), 0, max(0, scaled_h - 1)))
+                return (x, y)
+
+            def _scale_poly(points: np.ndarray) -> np.ndarray:
+                scaled = np.asarray(points, dtype=np.float32) * float(scale)
+                if scaled.size == 0:
+                    return np.zeros((0, 1, 2), dtype=np.int32)
+                scaled[:, 0] = np.clip(scaled[:, 0], 0.0, max(0.0, scaled_w - 1.0))
+                scaled[:, 1] = np.clip(scaled[:, 1], 0.0, max(0.0, scaled_h - 1.0))
+                return np.round(scaled).astype(np.int32).reshape(-1, 1, 2)
+
+            thickness = _overlay_thickness(scale)
+
+            if iso_overlay is not None:
+                ellipse_pts = _scale_poly(iso_overlay["ellipse"])
+                cv2.polylines(img_scaled, [ellipse_pts], True, _COLOR_ISO_ELLIPSE, thickness, cv2.LINE_AA)
+
+                major_pt1, major_pt2, major_color = iso_overlay["major"]
+                minor_pt1, minor_pt2, minor_color = iso_overlay["minor"]
+                cv2.line(img_scaled, _scale_point(major_pt1), _scale_point(major_pt2), major_color, thickness, cv2.LINE_AA)
+                cv2.line(img_scaled, _scale_point(minor_pt1), _scale_point(minor_pt2), minor_color, thickness, cv2.LINE_AA)
+
+            if gauss_overlay is not None:
+                g_pts = _scale_poly(gauss_overlay)
+                cv2.polylines(img_scaled, [g_pts], True, _COLOR_GAUSS, max(1, thickness - 1), cv2.LINE_AA)
+
+        return img_scaled
     except Exception as exc:
         app.logger.warning(f"compose profile error for {peak_id}: {exc}", exc_info=True)
         return None
