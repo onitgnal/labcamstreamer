@@ -63,6 +63,17 @@
   const causticModalZ = qs('#causticModalZ');
   const causticModalRoi = qs('#causticModalRoi');
   const causticModalUnit = qs('#causticModalUnit');
+  const causticLoadBtn = qs('#causticLoadBtn');
+  const causticImportModal = qs('#causticImportModal');
+  const causticImportClose = qs('#causticImportClose');
+  const causticImportFolder = qs('#causticImportFolder');
+  const causticImportRecursive = qs('#causticImportRecursive');
+  const causticImportCancel = qs('#causticImportCancel');
+  const causticImportConfirm = qs('#causticImportConfirm');
+  const causticImportProgress = qs('#causticImportProgress');
+  const causticImportProgressText = qs('#causticImportProgressText');
+  const causticImportProgressFill = causticImportProgress ? causticImportProgress.querySelector('.progress-fill') : null;
+  const toastContainer = qs('#toastContainer');
 
   // ----- State -----
   const state = {
@@ -94,6 +105,9 @@
 
   const roiImageTimers = new Map(); // Map<roiId, { profile:number, cuts:number }>
   let causticConfigTimer = null;
+  let causticImportTask = null;
+  let causticImportPollTimer = null;
+  let causticImportActive = false;
 
   const SATURATION_THRESHOLD = 250;
   // ----- REST helpers -----
@@ -140,6 +154,225 @@
     }
   }
 
+  function showToast(message, options = {}) {
+    const opts = options || {};
+    const variant = opts.variant || 'info';
+    const duration = typeof opts.duration === 'number' ? opts.duration : 5000;
+    if (!toastContainer) {
+      window.alert(String(message));
+      return;
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.dataset.variant = variant;
+
+    const msg = document.createElement('span');
+    msg.className = 'toast-message';
+    msg.textContent = String(message);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.type = 'button';
+    closeBtn.innerHTML = '&times;';
+
+    toast.appendChild(msg);
+    toast.appendChild(closeBtn);
+    toastContainer.appendChild(toast);
+
+    let hideTimer = null;
+    let removing = false;
+    const removeToast = () => {
+      if (removing) return;
+      removing = true;
+      toast.classList.remove('show');
+      const cleanup = () => {
+        if (toast.parentNode === toastContainer) {
+          toastContainer.removeChild(toast);
+        }
+      };
+      toast.addEventListener('transitionend', cleanup, { once: true });
+      setTimeout(cleanup, 300);
+    };
+
+    closeBtn.addEventListener('click', () => {
+      if (hideTimer) clearTimeout(hideTimer);
+      removeToast();
+    });
+
+    requestAnimationFrame(() => {
+      toast.classList.add('show');
+    });
+
+    if (duration > 0) {
+      hideTimer = setTimeout(removeToast, duration);
+    }
+  }
+
+  function setCausticImportBusy(busy) {
+    if (causticLoadBtn) causticLoadBtn.disabled = !!busy;
+    if (causticImportFolder) causticImportFolder.disabled = !!busy;
+    if (causticImportRecursive) causticImportRecursive.disabled = !!busy;
+    if (causticImportConfirm) causticImportConfirm.disabled = !!busy;
+  }
+
+  function resetCausticImportModal() {
+    if (causticImportFolder) causticImportFolder.value = '';
+    if (causticImportRecursive) causticImportRecursive.checked = false;
+    if (causticImportProgress) causticImportProgress.hidden = true;
+    if (causticImportProgressFill) causticImportProgressFill.style.width = '0%';
+    if (causticImportProgressText) causticImportProgressText.textContent = 'Waiting...';
+  }
+
+  function openCausticImportModal() {
+    if (!causticImportModal) return;
+    causticImportModal.hidden = false;
+    if (!causticImportActive) {
+      resetCausticImportModal();
+      setCausticImportBusy(false);
+      if (causticImportFolder) {
+        requestAnimationFrame(() => causticImportFolder.focus());
+      }
+    } else if (causticImportProgress) {
+      causticImportProgress.hidden = false;
+    }
+  }
+
+  function closeCausticImportModal() {
+    if (!causticImportModal) return;
+    causticImportModal.hidden = true;
+  }
+
+  function stopCausticImportPolling() {
+    if (causticImportPollTimer) {
+      clearTimeout(causticImportPollTimer);
+      causticImportPollTimer = null;
+    }
+  }
+
+  function updateCausticImportProgress(snapshot) {
+    if (!causticImportProgress) return;
+    causticImportProgress.hidden = false;
+    const status = (snapshot?.status || '').toLowerCase();
+    const total = Number(snapshot?.total_files ?? snapshot?.total ?? 0) || 0;
+    const processed = Number(snapshot?.processed_files ?? snapshot?.processed ?? 0) || 0;
+    const counts = snapshot?.counts || {};
+    const imported = Number(counts.imported || 0);
+    const duplicates = Number(counts.duplicates || 0);
+    const malformed = Number(counts.malformed || 0);
+    const ioErrors = Number(counts.io_errors || 0);
+    const skipped = duplicates + malformed + ioErrors;
+
+    let percent = 0;
+    if (status === 'completed') {
+      const total = Number(snapshot?.total_files ?? snapshot?.total ?? 0) || 0;
+      if (snapshot?.caustic_state) {
+        applyCausticState(snapshot.caustic_state);
+      } else {
+        refreshCausticState().catch(() => {});
+      }
+      if (total === 0) {
+        showToast('No BMP files found in the selected folder.', { variant: 'info', duration: 5000 });
+      } else {
+        const variant = summary.imported > 0 ? 'success' : 'info';
+        showToast(summary.message, { variant, duration: 6000 });
+      }
+    } else if (status === 'failed') {
+      const reason = snapshot?.error || 'Import failed';
+      showToast(reason, { variant: 'error', duration: 7000 });
+    }
+
+    causticImportActive = false;
+    setCausticImportBusy(false);
+
+    if (snapshot?.skipped?.length) {
+      console.info('Caustic import skipped files:', snapshot.skipped);
+    }
+
+    setTimeout(() => {
+      resetCausticImportModal();
+      closeCausticImportModal();
+    }, 200);
+  }
+
+  function finalizeCausticImport(snapshot) {
+    stopCausticImportPolling();
+    causticImportTask = snapshot;
+    updateCausticImportProgress(snapshot);
+    const status = (snapshot?.status || '').toLowerCase();
+    const counts = snapshot?.counts || {};
+    const summary = summarizeImportCounts(counts);
+    if (status === 'completed') {
+      const total = Number(snapshot?.total_files ?? snapshot?.total ?? 0) || 0;
+      if (snapshot?.caustic_state) {
+        applyCausticState(snapshot.caustic_state);
+      } else {
+        refreshCausticState().catch(() => {});
+      }
+      if (total === 0) {
+        showToast('No BMP files found in the selected folder.', { variant: 'info', duration: 5000 });
+      } else {
+        const variant = summary.imported > 0 ? 'success' : 'info';
+        showToast(summary.message, { variant, duration: 6000 });
+      }
+    } else if (status === 'failed') {
+      const reason = snapshot?.error || 'Import failed';
+      showToast(reason, { variant: 'error', duration: 7000 });
+    }
+    causticImportActive = false;
+    setCausticImportBusy(false);
+    if (snapshot?.skipped?.length) {
+      console.info('Caustic import skipped files:', snapshot.skipped);
+    }
+    setTimeout(() => {
+      resetCausticImportModal();
+      closeCausticImportModal();
+    }, 200);
+    causticImportTask = null;
+  }
+
+  async function startCausticImport(folder, recursive) {
+    stopCausticImportPolling();
+    causticImportActive = true;
+    setCausticImportBusy(true);
+    if (causticImportProgress) {
+      causticImportProgress.hidden = false;
+      if (causticImportProgressFill) causticImportProgressFill.style.width = '0%';
+      if (causticImportProgressText) causticImportProgressText.textContent = 'Starting...';
+    }
+
+    try {
+      const res = await fetch('/api/caustic/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder, recursive: !!recursive }),
+      });
+      if (!res.ok) {
+        let message = res.statusText || 'Failed to start import';
+        try {
+          const errData = await res.json();
+          if (errData?.error) message = errData.error;
+        } catch (_) {
+          try {
+            message = await res.text();
+          } catch (__){ /* ignore */ }
+        }
+        throw new Error(message);
+      }
+      const snapshot = await res.json();
+      causticImportTask = snapshot;
+      updateCausticImportProgress(snapshot);
+      if (snapshot?.task_id) {
+        causticImportPollTimer = setTimeout(() => pollCausticImport(snapshot.task_id), 600);
+      } else {
+        finalizeCausticImport(snapshot);
+      }
+    } catch (error) {
+      causticImportActive = false;
+      setCausticImportBusy(false);
+      if (causticImportProgress) causticImportProgress.hidden = true;
+      showToast(`Import failed to start: ${parseServerError(error)}`, { variant: 'error' });
+    }
+  }
   async function runAutoExposure() {
     if (!autoExposureBtn) return;
     const originalText = autoExposureBtn.textContent;
@@ -1804,6 +2037,49 @@
   if (causticSource) {
     causticSource.addEventListener('change', scheduleCausticConfigUpdate);
   }
+  if (causticLoadBtn) {
+    causticLoadBtn.addEventListener('click', openCausticImportModal);
+  }
+  if (causticImportClose) {
+    causticImportClose.addEventListener('click', closeCausticImportModal);
+  }
+  if (causticImportCancel) {
+    causticImportCancel.addEventListener('click', () => {
+      if (causticImportActive) {
+        closeCausticImportModal();
+        showToast('Import continues in background.', { variant: 'info', duration: 4000 });
+      } else {
+        closeCausticImportModal();
+      }
+    });
+  }
+  if (causticImportConfirm) {
+    causticImportConfirm.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      if (causticImportActive) return;
+      const folderValue = (causticImportFolder?.value || '').trim();
+      if (!folderValue) {
+        alert('Enter a folder path to import.');
+        return;
+      }
+      const recursive = !!(causticImportRecursive && causticImportRecursive.checked);
+      startCausticImport(folderValue, recursive);
+    });
+  }
+  if (causticImportFolder) {
+    causticImportFolder.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        if (!causticImportActive && causticImportConfirm) {
+          causticImportConfirm.click();
+        }
+      }
+    });
+  }
+
+  setCausticImportBusy(false);
+  resetCausticImportModal();
+
   if (causticFitBtn) {
     causticFitBtn.addEventListener('click', requestCausticFit);
   }
@@ -1902,3 +2178,7 @@
     }
   })();
 })();
+
+
+
+

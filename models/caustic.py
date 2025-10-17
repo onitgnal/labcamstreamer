@@ -22,6 +22,8 @@ __all__ = [
     "convert_length_to_meters",
     "convert_meters_to_length",
     "format_caustic_raw_filename",
+    "parse_caustic_filename",
+    "CausticFilenameError",
 ]
 
 
@@ -72,6 +74,61 @@ def _sanitize_filename_part(value: str, fallback: str) -> str:
     cleaned = _FILENAME_SANITIZER.sub("_", trimmed)
     cleaned = cleaned.strip("_")
     return cleaned or fallback
+
+
+class CausticFilenameError(ValueError):
+    """Raised when a stored caustic filename cannot be parsed."""
+
+
+_CAUSTIC_FILENAME_PATTERN = re.compile(
+    r"pixelsize_(?P<pix>[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)_m_pos_(?P<z>[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)_mm\.bmp$",
+    re.IGNORECASE,
+)
+
+
+def parse_caustic_filename(path: str) -> Tuple[float, float]:
+    """
+    Parse a stored caustic BMP filename and extract the pixel size (meters/pixel)
+    and z-position in millimetres.
+
+    Parameters
+    ----------
+    path : str
+        Absolute or relative path to the BMP file. Only the filename is used.
+
+    Returns
+    -------
+    tuple
+        (pixel_size_m, z_mm)
+
+    Raises
+    ------
+    CausticFilenameError
+        If the filename does not match the expected pattern or contains invalid
+        numeric values.
+    """
+    name = str(Path(path).name)
+    match = _CAUSTIC_FILENAME_PATTERN.search(name)
+    if not match:
+        raise CausticFilenameError(f"Filename does not match caustic pattern: {name}")
+
+    pix_str = match.group("pix")
+    z_str = match.group("z")
+    try:
+        pixel_size = float(pix_str)
+    except (TypeError, ValueError) as exc:
+        raise CausticFilenameError(f"Invalid pixel size value in filename: {name}") from exc
+    try:
+        z_mm = float(z_str)
+    except (TypeError, ValueError) as exc:
+        raise CausticFilenameError(f"Invalid z position value in filename: {name}") from exc
+
+    if not math.isfinite(pixel_size) or pixel_size <= 0.0:
+        raise CausticFilenameError(f"Pixel size must be positive in filename: {name}")
+    if not math.isfinite(z_mm):
+        raise CausticFilenameError(f"Z position must be finite in filename: {name}")
+
+    return pixel_size, z_mm
 
 
 def format_caustic_raw_filename(

@@ -2,34 +2,7 @@
   "wavelength_nm": 1030.0,
   "position_unit": "mm",
   "radii_source": "gauss_1e2",
-  "created_at": "2025-10-17T09:18:47Z",
-  "point_count": 3,
-  "fit_results": {
-    "x": {
-      "w0_m": 0.0008040632460242715,
-      "z0_m": -0.00040725721481803853,
-      "zR_prime_m": 0.002750263928297345,
-      "M2": 716.9992425725695,
-      "sigma": {
-        "w0_m": Infinity,
-        "z0_m": Infinity,
-        "B": Infinity,
-        "zR_prime_m": NaN,
-        "M2": Infinity
-      }
-    },
-    "y": {
-      "w0_m": 0.0003572767924689219,
-      "z0_m": -0.002236733368043892,
-      "zR_prime_m": 0.002700020498587936,
-      "M2": 144.19665972466439,
-      "sigma": {
-        "w0_m": Infinity,
-        "z0_m": Infinity,
-        "B": Infinity,
-        "zR_prime_m": NaN,
-        "M2": Infinity
-      }
-    }
-  }
+  "created_at": "2025-10-17T13:21:34Z",
+  "point_count": 1,
+  "fit_results": {}
 }

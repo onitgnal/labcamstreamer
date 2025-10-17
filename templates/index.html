@@ -125,6 +125,7 @@
               </select>
             </label>
             <div class="row caustic-actions">
+              <button id="causticLoadBtn" class="secondary">Load images...</button>
               <button id="causticFitBtn" class="primary">M² fit</button>
             </div>
             <div class="caustic-point-header">
@@ -229,6 +230,34 @@
     </div>
   </div>
 
+  <div id="causticImportModal" class="modal" hidden>
+    <div class="modal-content small">
+      <span id="causticImportClose" class="close-button">&times;</span>
+      <h2>Import Caustic Images</h2>
+      <p>Select a server folder containing BMP frames to append to the current caustic dataset.</p>
+      <label class="modal-label">
+        <span>Folder path (server-side)</span>
+        <input type="text" id="causticImportFolder" placeholder="C:\data\caustic" />
+      </label>
+      <label class="modal-checkbox">
+        <input type="checkbox" id="causticImportRecursive" />
+        <span>Scan recursively</span>
+      </label>
+      <div id="causticImportProgress" class="import-progress" hidden>
+        <div class="progress-track">
+          <div class="progress-fill"></div>
+        </div>
+        <div class="progress-meta">
+          <span id="causticImportProgressText">Waiting...</span>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="causticImportCancel" class="secondary">Cancel</button>
+        <button id="causticImportConfirm" class="primary">Import</button>
+      </div>
+    </div>
+  </div>
+
   <div id="backgroundSubtractionModal" class="modal" hidden>
     <div class="modal-content">
       <span class="close-button">&times;</span>
@@ -239,5 +268,9 @@
       <button id="startBgSubtraction" class="primary">Start</button>
     </div>
   </div>
+  <div id="toastContainer" class="toast-container"></div>
 </body>
 </html>
+
+
+

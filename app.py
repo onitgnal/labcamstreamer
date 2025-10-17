@@ -9,10 +9,12 @@ import zipfile
 import argparse
 import atexit
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Generator, Optional, Tuple, List
-from concurrent.futures import ProcessPoolExecutor
+from typing import Dict, Generator, Optional, Tuple, List, Set
+from dataclasses import dataclass, field
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 
 import cv2
@@ -26,9 +28,11 @@ from models.caustic import (
     CausticManager,
     CausticPoint,
     CausticRadiiSource,
+    CausticFilenameError,
     convert_length_to_meters,
     convert_meters_to_length,
     format_caustic_raw_filename,
+    parse_caustic_filename,
 )
 from roi import ROIRegistry
 
@@ -79,6 +83,294 @@ CAUSTIC_AUTOSAVE_DIR = EXPORTS_DIR / "caustic_autosave"
 CAUSTIC_AUTOSAVE_DIR.mkdir(parents=True, exist_ok=True)
 caustic_manager.set_autosave_dir(CAUSTIC_AUTOSAVE_DIR)
 
+@dataclass
+class CausticImportTask:
+    task_id: str
+    folder: str
+    recursive: bool
+    status: str = "queued"
+    total_files: int = 0
+    processed_files: int = 0
+    counts: Dict[str, int] = field(
+        default_factory=lambda: {
+            "imported": 0,
+            "duplicates": 0,
+            "malformed": 0,
+            "io_errors": 0,
+        }
+    )
+    skipped: List[Dict[str, str]] = field(default_factory=list)
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    completed_at: Optional[float] = None
+    caustic_state: Optional[Dict[str, object]] = None
+
+
+class CausticImportService:
+    def __init__(self, max_workers: int = 1) -> None:
+        self._tasks: Dict[str, CausticImportTask] = {}
+        self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._imported_paths: Set[str] = set()
+        self._imported_pairs: Set[Tuple[float, float]] = set()
+        atexit.register(self._shutdown)
+
+    def _shutdown(self) -> None:
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+    def start_import(self, folder: str, recursive: bool) -> CausticImportTask:
+        task_id = uuid.uuid4().hex
+        task = CausticImportTask(task_id=task_id, folder=folder, recursive=recursive)
+        with self._lock:
+            self._tasks[task_id] = task
+        self._executor.submit(self._run_task, task)
+        return task
+
+    def get_task_snapshot(self, task_id: str) -> Optional[Dict[str, object]]:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return None
+            return self._serialize_task(task)
+
+    def _serialize_task(self, task: CausticImportTask) -> Dict[str, object]:
+        return {
+            "task_id": task.task_id,
+            "folder": task.folder,
+            "recursive": task.recursive,
+            "status": task.status,
+            "total_files": task.total_files,
+            "processed_files": task.processed_files,
+            "counts": dict(task.counts),
+            "skipped": list(task.skipped),
+            "error": task.error,
+            "created_at": task.created_at,
+            "completed_at": task.completed_at,
+            "caustic_state": task.caustic_state,
+        }
+
+    @staticmethod
+    def _pair_key(pixel_size_m: float, z_mm: float) -> Tuple[float, float]:
+        return (round(float(pixel_size_m), 12), round(float(z_mm), 6))
+
+    def _run_task(self, task: CausticImportTask) -> None:
+        try:
+            folder_path = Path(task.folder).expanduser()
+        except Exception:
+            with self._lock:
+                task.status = "failed"
+                task.error = "Invalid folder path"
+                task.completed_at = time.time()
+            return
+
+        try:
+            folder_path = folder_path.resolve()
+        except Exception:
+            pass
+
+        if not folder_path.exists() or not folder_path.is_dir():
+            with self._lock:
+                task.status = "failed"
+                task.error = f"Folder not found: {folder_path}"
+                task.completed_at = time.time()
+            return
+
+        files: List[Path] = []
+        try:
+            iterator = folder_path.rglob("*") if task.recursive else folder_path.glob("*")
+            for candidate in iterator:
+                if candidate.is_file() and candidate.suffix.lower() == ".bmp":
+                    files.append(candidate)
+        except Exception as exc:
+            with self._lock:
+                task.status = "failed"
+                task.error = f"Failed to enumerate files: {exc}"
+                task.completed_at = time.time()
+            return
+
+        opts = _get_beam_options_copy()
+        opts["compute"] = "both"
+        _, analysis_kwargs, _ = _resolve_beam_analysis_options(opts)
+        # Force both radii to be computed regardless of UI preference.
+        analysis_kwargs["compute_gaussian"] = True
+        analysis_kwargs["compute_iso"] = True
+        analysis_compute_mode = "both"
+
+        with self._lock:
+            task.status = "running"
+            task.total_files = len(files)
+
+        local_paths: Set[str] = set()
+        local_pairs: Set[Tuple[float, float]] = set()
+
+        for path in files:
+            category = "imported"
+            reason = ""
+            abs_path: Optional[Path]
+            try:
+                abs_path = path.resolve()
+            except Exception:
+                abs_path = path
+
+            pixel_size_m: Optional[float] = None
+            z_mm: Optional[float] = None
+
+            try:
+                pixel_size_m, z_mm = parse_caustic_filename(path.name)
+            except CausticFilenameError as exc:
+                category = "malformed"
+                reason = str(exc)
+
+            if category == "imported" and pixel_size_m is not None and z_mm is not None:
+                path_key = str(abs_path)
+                pair_key = self._pair_key(pixel_size_m, z_mm)
+
+                with self._lock:
+                    duplicate_path = path_key in self._imported_paths or path_key in local_paths
+                    duplicate_pair = pair_key in self._imported_pairs or pair_key in local_pairs
+
+                if duplicate_path or duplicate_pair:
+                    category = "duplicates"
+                    if duplicate_path and duplicate_pair:
+                        reason = "Duplicate path and z/pixel combination"
+                    elif duplicate_path:
+                        reason = "Duplicate file path"
+                    else:
+                        reason = "Duplicate z/pixel combination"
+                else:
+                    existing_points = caustic_manager.list_points()
+                    for pt in existing_points:
+                        if pt.pixel_size_m is None:
+                            continue
+                        pair_existing = self._pair_key(float(pt.pixel_size_m), pt.z_m * 1e3)
+                        if pair_existing == pair_key:
+                            category = "duplicates"
+                            reason = "Duplicate z/pixel combination"
+                            break
+
+            if category == "imported" and pixel_size_m is not None and z_mm is not None:
+                img = cv2.imread(str(abs_path), cv2.IMREAD_UNCHANGED)
+                if img is None or getattr(img, "size", 0) == 0:
+                    category = "io_errors"
+                    reason = "Failed to load image"
+                else:
+                    try:
+                        if img.ndim == 3:
+                            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                        roi_gray = np.asarray(img, dtype=np.float64)
+                        result = analyze_beam(roi_gray, **analysis_kwargs)
+
+                        gauss_x = result.get("gauss_fit_x") or {}
+                        gauss_y = result.get("gauss_fit_y") or {}
+                        wx_1e2 = float(gauss_x.get("radius"))
+                        wy_1e2 = float(gauss_y.get("radius"))
+                        wx_2sigma = float(result.get("rx_iso"))
+                        wy_2sigma = float(result.get("ry_iso"))
+
+                        if not all(
+                            v > 0.0 and np.isfinite(v)
+                            for v in (wx_1e2, wy_1e2, wx_2sigma, wy_2sigma)
+                        ):
+                            raise ValueError("Computed radii are non-positive or non-finite")
+
+                        timestamp_iso: str
+                        try:
+                            stat = abs_path.stat()
+                            timestamp_iso = datetime.utcfromtimestamp(stat.st_mtime).isoformat(timespec="seconds") + "Z"
+                        except Exception:
+                            timestamp_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+                        z_m = float(z_mm) * 1e-3
+                        point_id = caustic_manager.generate_point_id()
+                        point_dir = _caustic_point_dir(point_id)
+
+                        profile_img, cuts_img = _generate_caustic_visuals_from_analysis(
+                            roi_gray,
+                            result,
+                            peak_id=f"import:{point_id}",
+                            pixel_size=pixel_size_m,
+                            compute_mode=analysis_compute_mode,
+                        )
+
+                        profile_path = _save_png_image(profile_img, point_dir / "profile.png") or ""
+
+                        cut_x_path = ""
+                        cut_y_path = ""
+                        if cuts_img is not None:
+                            try:
+                                h, w = cuts_img.shape[:2]
+                                mid = max(1, w // 2)
+                                cut_x_img = cuts_img[:, :mid].copy()
+                                cut_y_img = cuts_img[:, mid:].copy()
+                            except Exception:
+                                cut_x_img = cuts_img
+                                cut_y_img = cuts_img
+                            cut_x_path = _save_png_image(cut_x_img, point_dir / "cut_x.png") or ""
+                            cut_y_path = _save_png_image(cut_y_img, point_dir / "cut_y.png") or ""
+
+                        raw_path = _save_raw_roi_bmp(roi_gray, point_dir / (abs_path.name)) or ""
+
+                        stem = abs_path.stem.strip()
+                        roi_label = (stem or "import")[:32]
+
+                        app.logger.info(
+                            "Caustic import: %s (pixel_size_m=%.6g, z_mm=%.6g)",
+                            abs_path,
+                            float(pixel_size_m),
+                            float(z_mm),
+                        )
+
+                        point = CausticPoint(
+                            point_id=point_id,
+                            roi_id=roi_label,
+                            timestamp_iso=timestamp_iso,
+                            z_m=z_m,
+                            position_unit_at_capture="mm",
+                            wavelength_nm=float(caustic_manager.config_snapshot().get("wavelength_nm", 1030.0)),
+                            pixel_size_m=float(pixel_size_m),
+                            wx_1e2=wx_1e2,
+                            wy_1e2=wy_1e2,
+                            wx_2sigma=wx_2sigma,
+                            wy_2sigma=wy_2sigma,
+                            profile_img_path=profile_path,
+                            cut_x_img_path=cut_x_path,
+                            cut_y_img_path=cut_y_path,
+                            raw_roi_img_path=raw_path,
+                        )
+                        caustic_manager.add_point(point)
+
+                        with self._lock:
+                            local_paths.add(str(abs_path))
+                            self._imported_paths.add(str(abs_path))
+                            local_pairs.add(pair_key)
+                            self._imported_pairs.add(pair_key)
+
+                    except Exception as exc:
+                        app.logger.error(f"Failed to process caustic import image {abs_path}: {exc}", exc_info=True)
+                        category = "io_errors"
+                        reason = str(exc)
+
+            with self._lock:
+                task.processed_files += 1
+                task.counts.setdefault(category, 0)
+                task.counts[category] += 1
+                if category != "imported":
+                    task.skipped.append({
+                        "file": str(abs_path),
+                        "reason": reason or category,
+                    })
+
+        with self._lock:
+            task.status = "completed"
+            task.completed_at = time.time()
+            task.caustic_state = _caustic_state_payload()
+
+
+_caustic_import_service = CausticImportService()
+
 # ----- Beam analysis options (global) -----
 _beam_opts_lock = threading.Lock()
 _beam_opts = {
@@ -107,6 +399,54 @@ def _get_configured_pixel_size() -> Optional[float]:
 def _get_beam_options_copy() -> Dict[str, object]:
     with _beam_opts_lock:
         return dict(_beam_opts)
+
+
+def _resolve_beam_analysis_options(
+    opts: Dict[str, object],
+) -> Tuple[str, Dict[str, object], Optional[float]]:
+    compute = str(opts.get("compute", "both") or "both").lower()
+    if compute not in {"both", "second", "gauss", "none"}:
+        compute = "both"
+
+    clip_mode = str(opts.get("clip_negatives", "none") or "none").lower()
+    if clip_mode not in {"none", "zero", "otsu"}:
+        clip_mode = "none"
+
+    angle_clip = str(opts.get("angle_clip_mode", "otsu") or "otsu").lower()
+    if angle_clip == "same":
+        angle_clip_param: Optional[str] = None
+    elif angle_clip in {"none", "zero", "otsu"}:
+        angle_clip_param = angle_clip
+    else:
+        angle_clip_param = "otsu"
+
+    bg_sub = bool(opts.get("background_subtraction", True))
+    rotation_mode = str(opts.get("rotation", "auto") or "auto").lower()
+    fixed_angle_deg = opts.get("fixed_angle")
+    if rotation_mode == "fixed":
+        try:
+            rot_angle = 0.0 if fixed_angle_deg in (None, "") else float(fixed_angle_deg) * np.pi / 180.0
+        except Exception:
+            rot_angle = 0.0
+    else:
+        rot_angle = None
+
+    compute_gauss = compute in ("both", "gauss")
+
+    try:
+        pixel_size_val = float(opts.get("pixel_size")) if opts.get("pixel_size") not in (None, "") else None
+    except Exception:
+        pixel_size_val = None
+
+    analysis_kwargs = {
+        "clip_negatives": clip_mode,
+        "angle_clip_mode": angle_clip_param,
+        "background_subtraction": bg_sub,
+        "rotation_angle": rot_angle,
+        "compute_gaussian": compute_gauss,
+        "compute_iso": compute in ("both", "second"),
+    }
+    return compute, analysis_kwargs, pixel_size_val
 
 
 class BeamAnalysisManager:
@@ -140,39 +480,7 @@ class BeamAnalysisManager:
 
     def update(self, gray: Optional[np.ndarray], rois: Optional[Tuple], opts: Dict[str, object]) -> None:
         frame_ts = time.time()
-        compute = str(opts.get("compute", "both") or "both").lower()
-        if compute not in {"both", "second", "gauss", "none"}:
-            compute = "both"
-
-        clip_mode = str(opts.get("clip_negatives", "none") or "none").lower()
-        if clip_mode not in {"none", "zero", "otsu"}:
-            clip_mode = "none"
-
-        angle_clip = str(opts.get("angle_clip_mode", "otsu") or "otsu").lower()
-        angle_clip_param: Optional[str]
-        if angle_clip == "same":
-            angle_clip_param = None
-        elif angle_clip in {"none", "zero", "otsu"}:
-            angle_clip_param = angle_clip
-        else:
-            angle_clip_param = "otsu"
-
-        bg_sub = bool(opts.get("background_subtraction", True))
-        rotation_mode = str(opts.get("rotation", "auto") or "auto").lower()
-        fixed_angle_deg = opts.get("fixed_angle")
-        if rotation_mode == "fixed":
-            try:
-                rot_angle = 0.0 if fixed_angle_deg in (None, "") else float(fixed_angle_deg) * np.pi / 180.0
-            except Exception:
-                rot_angle = 0.0
-        else:
-            rot_angle = None
-        compute_gauss = compute in ("both", "gauss")
-
-        try:
-            pixel_size_val = float(opts.get("pixel_size")) if opts.get("pixel_size") not in (None, "") else None
-        except Exception:
-            pixel_size_val = None
+        compute, analysis_kwargs, pixel_size_val = _resolve_beam_analysis_options(opts)
 
         entries: Dict[str, Dict[str, object]] = {}
         rois_list = list(rois) if rois else []
@@ -230,15 +538,6 @@ class BeamAnalysisManager:
                     prev_entry = previous_data.get(rid)
                     if prev_entry:
                         entries[rid]["result"] = prev_entry.get("result")
-
-        analysis_kwargs = {
-            "clip_negatives": clip_mode,
-            "angle_clip_mode": angle_clip_param,
-            "background_subtraction": bg_sub,
-            "rotation_angle": rot_angle,
-            "compute_gaussian": compute_gauss,
-            "compute_iso": compute in ("both", "second"),
-        }
 
         if should_analyze and images:
             payloads = [(img, dict(analysis_kwargs)) for img in images]
@@ -452,18 +751,19 @@ def _get_roi_raw_gray_image(rid: str) -> Optional[np.ndarray]:
     return np.asarray(roi_crop).copy()
 
 
-def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
-    entry = beam_manager.get(rid)
-    compute_mode = str(entry.get("compute") if entry else "none").lower()
-    result = entry.get("result") if entry else None
-
-    roi_gray = _get_roi_gray_image(rid, entry=entry)
-    if roi_gray is None:
+def _build_profile_image_from_analysis(
+    roi_gray: Optional[np.ndarray],
+    result: Optional[Dict[str, object]],
+    *,
+    compute_mode: str,
+    peak_id: str,
+) -> Optional[np.ndarray]:
+    if roi_gray is None or getattr(roi_gray, "size", 0) == 0:
         return None
 
-    compute = compute_mode or "none"
+    compute = (compute_mode or "none").lower()
     cm = cam_service.get_colormap()
-    base_peak = _update_roi_peak_intensity(rid, roi_gray)
+    base_peak = _update_roi_peak_intensity(peak_id, roi_gray)
 
     if compute == "none" or not result:
         roi_u8 = _normalize_to_u8(roi_gray, base_peak)
@@ -479,7 +779,7 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
             proc = np.mean(proc, axis=-1)
         proc = np.nan_to_num(proc, nan=0.0, posinf=0.0, neginf=0.0)
 
-        peak = _update_roi_peak_intensity(rid, proc)
+        peak = _update_roi_peak_intensity(peak_id, proc)
         roi_u8 = _normalize_to_u8(proc, peak)
         img = apply_colormap_to_gray(roi_u8, cm)
 
@@ -546,8 +846,134 @@ def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
         scaled_h = int(round(target_h))
         return cv2.resize(img, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
     except Exception as exc:
-        app.logger.warning(f"compose profile error for ROI {rid}: {exc}", exc_info=True)
+        app.logger.warning(f"compose profile error for {peak_id}: {exc}", exc_info=True)
         return None
+
+
+def _build_cuts_image_from_analysis(
+    result: Optional[Dict[str, object]],
+    *,
+    compute_mode: str,
+    peak_id: str,
+    pixel_size: Optional[float],
+) -> Optional[np.ndarray]:
+    compute = (compute_mode or "none").lower()
+    draw_iso = compute in ("both", "second")
+    if compute == "none" or result is None:
+        app.logger.debug(f"compose cuts skipping for id {peak_id}: compute={compute}, has_result={bool(result)}")
+        return None
+
+    try:
+        x_positions, Ix = result["Ix_spectrum"]
+        y_positions, Iy = result["Iy_spectrum"]
+        Ix = np.asarray(Ix, dtype=np.float32)
+        Iy = np.asarray(Iy, dtype=np.float32)
+        peak_x, peak_y = _update_roi_cuts_peak(peak_id, Ix, Iy)
+
+        fit_x = result.get("gauss_fit_x") or {}
+        fit_y = result.get("gauss_fit_y") or {}
+        cx_iso = float(result.get("cx_iso", result.get("cx", 0.0)))
+        cy_iso = float(result.get("cy_iso", result.get("cy", 0.0)))
+        rx_iso = float(result.get("rx_iso", 0.0)) if draw_iso else 0.0
+        ry_iso = float(result.get("ry_iso", 0.0)) if draw_iso else 0.0
+        gauss_cx = float(fit_x.get("centre", cx_iso))
+        gauss_cy = float(fit_y.get("centre", cy_iso))
+        gauss_rx = float(fit_x.get("radius", 0.0)) if fit_x else 0.0
+        gauss_ry = float(fit_y.get("radius", 0.0)) if fit_y else 0.0
+        amp_x = float(fit_x.get("amplitude", 0.0)) if fit_x else 0.0
+        amp_y = float(fit_y.get("amplitude", 0.0)) if fit_y else 0.0
+
+        try:
+            pixel_size_val = float(pixel_size) if pixel_size not in (None, "") else None
+        except (TypeError, ValueError):
+            pixel_size_val = None
+
+        unit_suffix = '' if pixel_size_val is not None else ' px'
+        rx_iso_disp = rx_iso * (pixel_size_val or 1.0)
+        ry_iso_disp = ry_iso * (pixel_size_val or 1.0)
+        gauss_rx_disp = gauss_rx * (pixel_size_val or 1.0)
+        gauss_ry_disp = gauss_ry * (pixel_size_val or 1.0)
+
+        title_x = f"Ix | ISO:{rx_iso_disp:.1e} | G:{gauss_rx_disp:.1e}{unit_suffix}"
+        title_y = f"Iy | ISO:{ry_iso_disp:.1e} | G:{gauss_ry_disp:.1e}{unit_suffix}"
+
+        canvas = np.full((240, 480, 3), _PLOT_BG, dtype=np.uint8)
+        with _plot_lock:
+            _draw_cuts_panel(
+                canvas[:, :240],
+                np.asarray(x_positions, dtype=np.float32),
+                Ix,
+                title=title_x,
+                axis_label="x (local px)",
+                line_color=_COLOR_X_ISO,
+                iso_center=cx_iso,
+                iso_radius=rx_iso,
+                gauss_amplitude=amp_x,
+                gauss_center=gauss_cx,
+                gauss_radius=gauss_rx,
+                pixel_size=pixel_size_val,
+                value_max=peak_x,
+            )
+            _draw_cuts_panel(
+                canvas[:, 240:],
+                np.asarray(y_positions, dtype=np.float32),
+                Iy,
+                title=title_y,
+                axis_label="y (local px)",
+                line_color=_COLOR_Y_ISO,
+                iso_center=cy_iso,
+                iso_radius=ry_iso,
+                gauss_amplitude=amp_y,
+                gauss_center=gauss_cy,
+                gauss_radius=gauss_ry,
+                pixel_size=pixel_size_val,
+                value_max=peak_y,
+            )
+            cv2.line(canvas, (240, 24), (240, 240 - 24), _PLOT_AXIS, 1, cv2.LINE_AA)
+        return canvas
+    except Exception as exc:
+        app.logger.warning(f"compose cuts error for id {peak_id}: {exc}", exc_info=True)
+        return None
+
+
+def _generate_caustic_visuals_from_analysis(
+    roi_gray: Optional[np.ndarray],
+    result: Optional[Dict[str, object]],
+    *,
+    peak_id: str,
+    pixel_size: Optional[float] = None,
+    compute_mode: str = "both",
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    try:
+        profile = _build_profile_image_from_analysis(
+            roi_gray,
+            result,
+            compute_mode=compute_mode,
+            peak_id=peak_id,
+        )
+        cuts = _build_cuts_image_from_analysis(
+            result,
+            compute_mode=compute_mode,
+            peak_id=peak_id,
+            pixel_size=pixel_size,
+        )
+        return profile, cuts
+    finally:
+        _reset_roi_peak_history(peak_id)
+
+
+def _compose_roi_profile_image(rid: str) -> Optional[np.ndarray]:
+    entry = beam_manager.get(rid)
+    compute_mode = str(entry.get("compute") if entry else "none").lower()
+    result = entry.get("result") if entry else None
+
+    roi_gray = _get_roi_gray_image(rid, entry=entry)
+    return _build_profile_image_from_analysis(
+        roi_gray,
+        result,
+        compute_mode=compute_mode,
+        peak_id=rid,
+    )
 
 _PLOT_BG = (29, 21, 17)
 _PLOT_AXIS = (82, 86, 96)
@@ -653,82 +1079,17 @@ def _compose_roi_cuts_image(rid: str) -> Optional[np.ndarray]:
     compute_mode = str(entry.get("compute") if entry else "none").lower()
     result = entry.get("result") if entry else None
     pixel_size_val = entry.get("pixel_size") if entry else None
-    draw_iso = compute_mode in ("both", "second")
     try:
         pixel_size_val = float(pixel_size_val)
     except (TypeError, ValueError):
         pixel_size_val = None
 
-    if compute_mode == "none" or result is None:
-        app.logger.debug(f"compose cuts skipping for ROI {rid}: compute={compute_mode}, has_result={bool(result)}")
-        return None
-
-    try:
-        x_positions, Ix = result["Ix_spectrum"]
-        y_positions, Iy = result["Iy_spectrum"]
-        Ix = np.asarray(Ix, dtype=np.float32)
-        Iy = np.asarray(Iy, dtype=np.float32)
-        peak_x, peak_y = _update_roi_cuts_peak(rid, Ix, Iy)
-
-        fit_x = result.get("gauss_fit_x") or {}
-        fit_y = result.get("gauss_fit_y") or {}
-        cx_iso = float(result.get("cx_iso", result.get("cx", 0.0)))
-        cy_iso = float(result.get("cy_iso", result.get("cy", 0.0)))
-        rx_iso = float(result.get("rx_iso", 0.0)) if draw_iso else 0.0
-        ry_iso = float(result.get("ry_iso", 0.0)) if draw_iso else 0.0
-        gauss_cx = float(fit_x.get("centre", cx_iso))
-        gauss_cy = float(fit_y.get("centre", cy_iso))
-        gauss_rx = float(fit_x.get("radius", 0.0)) if fit_x else 0.0
-        gauss_ry = float(fit_y.get("radius", 0.0)) if fit_y else 0.0
-        amp_x = float(fit_x.get("amplitude", 0.0)) if fit_x else 0.0
-        amp_y = float(fit_y.get("amplitude", 0.0)) if fit_y else 0.0
-
-        unit_suffix = '' if pixel_size_val is not None else ' px'
-        rx_iso_disp = rx_iso * (pixel_size_val or 1.0)
-        ry_iso_disp = ry_iso * (pixel_size_val or 1.0)
-        gauss_rx_disp = gauss_rx * (pixel_size_val or 1.0)
-        gauss_ry_disp = gauss_ry * (pixel_size_val or 1.0)
-
-        title_x = f"Ix | ISO:{rx_iso_disp:.1e} | G:{gauss_rx_disp:.1e}{unit_suffix}"
-        title_y = f"Iy | ISO:{ry_iso_disp:.1e} | G:{gauss_ry_disp:.1e}{unit_suffix}"
-
-        canvas = np.full((240, 480, 3), _PLOT_BG, dtype=np.uint8)
-        with _plot_lock:
-            _draw_cuts_panel(
-                canvas[:, :240],
-                np.asarray(x_positions, dtype=np.float32),
-                Ix,
-                title=title_x,
-                axis_label="x (local px)",
-                line_color=_COLOR_X_ISO,
-                iso_center=cx_iso,
-                iso_radius=rx_iso,
-                gauss_amplitude=amp_x,
-                gauss_center=gauss_cx,
-                gauss_radius=gauss_rx,
-                pixel_size=pixel_size_val,
-                value_max=peak_x,
-            )
-            _draw_cuts_panel(
-                canvas[:, 240:],
-                np.asarray(y_positions, dtype=np.float32),
-                Iy,
-                title=title_y,
-                axis_label="y (local px)",
-                line_color=_COLOR_Y_ISO,
-                iso_center=cy_iso,
-                iso_radius=ry_iso,
-                gauss_amplitude=amp_y,
-                gauss_center=gauss_cy,
-                gauss_radius=gauss_ry,
-                pixel_size=pixel_size_val,
-                value_max=peak_y,
-            )
-            cv2.line(canvas, (240, 24), (240, 240 - 24), _PLOT_AXIS, 1, cv2.LINE_AA)
-        return canvas
-    except Exception as exc:
-        app.logger.warning(f"compose cuts error for ROI {rid}: {exc}", exc_info=True)
-        return None
+    return _build_cuts_image_from_analysis(
+        result,
+        compute_mode=compute_mode,
+        peak_id=rid,
+        pixel_size=pixel_size_val,
+    )
 
 
 
@@ -1261,6 +1622,26 @@ def caustic_config():
             return jsonify({"error": str(exc)}), 400
 
     return jsonify(_caustic_state_payload())
+
+
+@app.route("/api/caustic/import", methods=["POST"])
+def caustic_import():
+    data = request.get_json(silent=True) or {}
+    folder = str(data.get("folder") or "").strip()
+    if not folder:
+        return jsonify({"error": "folder is required"}), 400
+    recursive = bool(data.get("recursive", False))
+    task = _caustic_import_service.start_import(folder, recursive)
+    snapshot = _caustic_import_service.get_task_snapshot(task.task_id) or {}
+    return jsonify(snapshot), 202
+
+
+@app.route("/api/caustic/import/<task_id>")
+def caustic_import_status(task_id: str):
+    snapshot = _caustic_import_service.get_task_snapshot(task_id)
+    if not snapshot:
+        return jsonify({"error": "task not found"}), 404
+    return jsonify(snapshot)
 
 
 @app.route("/caustic/add", methods=["POST"])
