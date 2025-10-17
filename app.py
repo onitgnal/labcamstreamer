@@ -9,11 +9,14 @@ import zipfile
 import argparse
 import atexit
 import tempfile
+import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Generator, Optional, Tuple, List, Set
 from dataclasses import dataclass, field
+from werkzeug.utils import secure_filename
+from werkzeug.datastructures import FileStorage
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 
@@ -88,6 +91,9 @@ class CausticImportTask:
     task_id: str
     folder: str
     recursive: bool
+    source: str = "folder"
+    files: Optional[List[str]] = None
+    temp_dir: Optional[str] = None
     status: str = "queued"
     total_files: int = 0
     processed_files: int = 0
@@ -123,9 +129,48 @@ class CausticImportService:
 
     def start_import(self, folder: str, recursive: bool) -> CausticImportTask:
         task_id = uuid.uuid4().hex
-        task = CausticImportTask(task_id=task_id, folder=folder, recursive=recursive)
+        task = CausticImportTask(task_id=task_id, folder=folder, recursive=recursive, source="folder")
         with self._lock:
             self._tasks[task_id] = task
+        self._executor.submit(self._run_task, task)
+        return task
+
+    def start_import_upload(self, files: List["FileStorage"]) -> CausticImportTask:
+        if not files:
+            raise ValueError("No files uploaded")
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="caustic_upload_"))
+        saved_paths: List[str] = []
+
+        try:
+            for storage in files:
+                filename = storage.filename or ""
+                safe_name = secure_filename(filename) or "upload.bmp"
+                if not safe_name.lower().endswith(".bmp"):
+                    safe_name = f"{safe_name}.bmp"
+                target = temp_dir / safe_name
+                counter = 1
+                while target.exists():
+                    target = temp_dir / f"{target.stem}_{counter}{target.suffix}"
+                    counter += 1
+                storage.save(target)
+                saved_paths.append(str(target))
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
+        task_id = uuid.uuid4().hex
+        task = CausticImportTask(
+            task_id=task_id,
+            folder=str(temp_dir),
+            recursive=False,
+            source="upload",
+            files=saved_paths,
+            temp_dir=str(temp_dir),
+        )
+        with self._lock:
+            self._tasks[task_id] = task
+            task.total_files = len(saved_paths)
         self._executor.submit(self._run_task, task)
         return task
 
@@ -141,6 +186,7 @@ class CausticImportService:
             "task_id": task.task_id,
             "folder": task.folder,
             "recursive": task.recursive,
+            "source": task.source,
             "status": task.status,
             "total_files": task.total_files,
             "processed_files": task.processed_files,
@@ -179,17 +225,20 @@ class CausticImportService:
             return
 
         files: List[Path] = []
-        try:
-            iterator = folder_path.rglob("*") if task.recursive else folder_path.glob("*")
-            for candidate in iterator:
-                if candidate.is_file() and candidate.suffix.lower() == ".bmp":
-                    files.append(candidate)
-        except Exception as exc:
-            with self._lock:
-                task.status = "failed"
-                task.error = f"Failed to enumerate files: {exc}"
-                task.completed_at = time.time()
-            return
+        if task.files:
+            files = [Path(p) for p in task.files]
+        else:
+            try:
+                iterator = folder_path.rglob("*") if task.recursive else folder_path.glob("*")
+                for candidate in iterator:
+                    if candidate.is_file() and candidate.suffix.lower() == ".bmp":
+                        files.append(candidate)
+            except Exception as exc:
+                with self._lock:
+                    task.status = "failed"
+                    task.error = f"Failed to enumerate files: {exc}"
+                    task.completed_at = time.time()
+                return
 
         opts = _get_beam_options_copy()
         opts["compute"] = "both"
@@ -366,7 +415,20 @@ class CausticImportService:
         with self._lock:
             task.status = "completed"
             task.completed_at = time.time()
-            task.caustic_state = _caustic_state_payload()
+            state_payload = _caustic_state_payload()
+            try:
+                points_payload = state_payload.get("points", [])
+                if points_payload:
+                    state_payload["last_added_point_id"] = points_payload[-1]["id"]
+            except Exception:
+                pass
+            task.caustic_state = state_payload
+
+        if task.source == "upload" and task.temp_dir:
+            try:
+                shutil.rmtree(Path(task.temp_dir), ignore_errors=True)
+            except Exception:
+                pass
 
 
 _caustic_import_service = CausticImportService()
@@ -1642,6 +1704,22 @@ def caustic_import_status(task_id: str):
     if not snapshot:
         return jsonify({"error": "task not found"}), 404
     return jsonify(snapshot)
+
+
+@app.route("/api/caustic/import/upload", methods=["POST"])
+def caustic_import_upload():
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "No files uploaded"}), 400
+    try:
+        task = _caustic_import_service.start_import_upload(files)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        app.logger.error("Failed to queue caustic import upload: %s", exc, exc_info=True)
+        return jsonify({"error": "Failed to start upload import"}), 500
+    snapshot = _caustic_import_service.get_task_snapshot(task.task_id) or {}
+    return jsonify(snapshot), 202
 
 
 @app.route("/caustic/add", methods=["POST"])

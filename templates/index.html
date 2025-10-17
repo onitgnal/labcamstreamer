@@ -234,15 +234,31 @@
     <div class="modal-content small">
       <span id="causticImportClose" class="close-button">&times;</span>
       <h2>Import Caustic Images</h2>
-      <p>Select a server folder containing BMP frames to append to the current caustic dataset.</p>
-      <label class="modal-label">
-        <span>Folder path (server-side)</span>
-        <input type="text" id="causticImportFolder" placeholder="C:\data\caustic" />
-      </label>
-      <label class="modal-checkbox">
-        <input type="checkbox" id="causticImportRecursive" />
-        <span>Scan recursively</span>
-      </label>
+      <p>Choose previously saved BMP frames to add to the current dataset.</p>
+      <div class="modal-radio">
+        <input type="radio" name="causticImportMode" id="causticImportModeUpload" value="upload" checked />
+        <span>Upload from this computer</span>
+      </div>
+      <div class="modal-radio">
+        <input type="radio" name="causticImportMode" id="causticImportModeServer" value="server" />
+        <span>Use a server-side folder</span>
+      </div>
+      <div id="causticImportUploadGroup" class="modal-section">
+        <label class="modal-label">
+          <span>Select BMP files</span>
+          <input type="file" id="causticImportFiles" accept=".bmp,.BMP" multiple />
+        </label>
+      </div>
+      <div id="causticImportServerGroup" class="modal-section" hidden>
+        <label class="modal-label">
+          <span>Folder path (server-side)</span>
+          <input type="text" id="causticImportFolder" placeholder="C:\data\caustic" />
+        </label>
+        <label class="modal-checkbox">
+          <input type="checkbox" id="causticImportRecursive" />
+          <span>Scan recursively</span>
+        </label>
+      </div>
       <div id="causticImportProgress" class="import-progress" hidden>
         <div class="progress-track">
           <div class="progress-fill"></div>
@@ -257,7 +273,6 @@
       </div>
     </div>
   </div>
-
   <div id="backgroundSubtractionModal" class="modal" hidden>
     <div class="modal-content">
       <span class="close-button">&times;</span>

@@ -760,6 +760,26 @@ input[type="text"]:disabled{
 .modal-checkbox input {
   margin: 0;
 }
+.modal-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 14px;
+}
+
+.modal-radio input {
+  margin: 0;
+}
+
+.modal-section {
+  margin: 12px 0 18px;
+}
+
+.modal-section input[type="file"] {
+  width: 100%;
+}
+
 
 .import-progress {
   margin: 10px 0 18px;
