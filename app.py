@@ -2393,9 +2393,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Flask-based camera streamer.")
     parser.add_argument("--dev", action="store_true", help="Enable development mode (logging to file).")
     parser.add_argument("--camera_id", type=str, help="Default camera ID to use.")
+    parser.add_argument("--port", type=int, default=5000, help="Port to bind the web server (default: 5000).")
     args = parser.parse_args()
 
-    port = 5000
+    if not (0 <= args.port <= 65535):
+        parser.error("--port must be between 0 and 65535.")
+
+    port = args.port
 
     # Setup logging first. cam_service was already instantiated with app.logger,
     # so it will pick up this configuration.
@@ -2407,4 +2411,3 @@ if __name__ == "__main__":
 
     app.logger.info(f"Starting server on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
-

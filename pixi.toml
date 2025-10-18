@@ -1,7 +1,7 @@
 [workspace]
 channels = ["conda-forge"]
 name = "labcamstreamer"
-platforms = ["win-64"]
+platforms = ["win-64", "osx-64", "osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
@@ -17,5 +17,7 @@ debugpy = ">=1.8.0,<2"
 
 [pypi-dependencies]
 pytest = ">=8.3.3,<9"
-vmbpy = ">=1.1.1, <2"
 
+[target.win-64.pypi-dependencies]
+# Allied Vision supplies wheels only for Windows; other platforms fall back to FakeCamera.
+vmbpy = ">=1.1.1,<2"

@@ -1,4 +1,0 @@
-timestamp_iso,roi_id,z,wavelength_nm,wx_1e2,wy_1e2,wx_2sigma,wy_2sigma,profile_img,cut_x_img,cut_y_img,raw_roi_img
-2025-10-17T07:09:33Z,roi-2,1,1030,54.6937,56.164,49.9417,51.1055,images\001_1d6a578d965f46439de46c6bc69c0c99_profile.png,images\001_1d6a578d965f46439de46c6bc69c0c99_cut_x.png,images\001_1d6a578d965f46439de46c6bc69c0c99_cut_y.png,images\001_1d6a578d965f46439de46c6bc69c0c99_raw.bmp
-2025-10-17T07:09:37Z,roi-3,2,1030,99.5162,67.7326,95.795,62.7216,images\002_f57ed1bdaed34a538887a91f6f8acc66_profile.png,images\002_f57ed1bdaed34a538887a91f6f8acc66_cut_x.png,images\002_f57ed1bdaed34a538887a91f6f8acc66_cut_y.png,images\002_f57ed1bdaed34a538887a91f6f8acc66_raw.bmp
-2025-10-17T07:10:02Z,roi-1,3,1030,65.1414,22.0245,61.9823,21.3089,images\003_1e60475a30764d4789e9af5c2d1e2aab_profile.png,images\003_1e60475a30764d4789e9af5c2d1e2aab_cut_x.png,images\003_1e60475a30764d4789e9af5c2d1e2aab_cut_y.png,images\003_1e60475a30764d4789e9af5c2d1e2aab_raw.bmp
