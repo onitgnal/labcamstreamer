@@ -38,7 +38,7 @@ except ImportError:
     def intersect_pixel_formats(a, b):
         return []
 
-from fake_camera import FakeCamera, FakeFrame
+from fake_camera import FakeCamera, FakeFrame, MPCCamera, MPCParameters
 
 # Camera display pixel format for OpenCV/JPEG
 OPENCV_DISPLAY_FORMAT = PixelFormat.Bgr8
@@ -172,6 +172,8 @@ class CameraService:
         self._frame_lock = threading.Lock()
         self._exposure_lock = threading.Lock()
         self._colormap_lock = threading.Lock()
+        self._mpc_lock = threading.Lock()
+        self._mpc_config = MPCParameters()
 
         self._latest_bgr: Optional[np.ndarray] = None
         self._latest_gray: Optional[np.ndarray] = None
@@ -188,7 +190,10 @@ class CameraService:
 
     def list_available_cameras(self) -> List[Dict[str, str]]:
         """Lists all available physical cameras and adds the FakeCamera option."""
-        cameras = [{"id": "fake", "name": "Fake Camera"}]
+        cameras = [
+            {"id": "fake", "name": "Fake Camera"},
+            {"id": "mpc", "name": "MPC Camera"},
+        ]
         try:
             with VmbSystem.get_instance() as vmb:
                 real_cams = vmb.get_all_cameras()
@@ -197,6 +202,32 @@ class CameraService:
         except Exception as e:
             self._logger.error(f"Could not list VmbPy cameras: {e}", exc_info=True)
         return cameras
+
+    def get_mpc_config(self) -> Dict[str, object]:
+        """Return the cached MPC design parameters plus derived metrics."""
+        with self._mpc_lock:
+            config = self._mpc_config
+
+        if isinstance(self._cam, MPCCamera):
+            try:
+                return self._cam.get_payload()
+            except Exception as exc:
+                self._logger.debug(f"Falling back to cached MPC config: {exc}")
+        return config.to_payload()
+
+    def update_mpc_config(self, updates: Dict[str, object]) -> Dict[str, object]:
+        """Apply frontend updates to the MPC parameters and propagate to the active camera."""
+        updates = updates or {}
+        with self._mpc_lock:
+            new_params = self._mpc_config.with_updates(**updates)
+            self._mpc_config = new_params
+
+        if isinstance(self._cam, MPCCamera):
+            self._cam.set_parameters(new_params)
+        return new_params.to_payload()
+
+    def is_mpc_active(self) -> bool:
+        return isinstance(self._cam, MPCCamera)
 
     def start(self, camera_id: Optional[str] = None) -> None:
         if self._running:
@@ -231,6 +262,19 @@ class CameraService:
             self._active_camera_id = "fake"
             self._running = True
             self._logger.info("FakeCamera started.")
+            return
+
+        if target_camera_id == "mpc":
+            self._logger.info("Initializing MPCCamera...")
+            with self._mpc_lock:
+                params = self._mpc_config
+            cam = MPCCamera(camera_id="mpc", logger=self._logger, parameters=params)
+            self._cam = cam
+            self._cam.__enter__()
+            self._cam.start_streaming(handler=self._handler)
+            self._active_camera_id = "mpc"
+            self._running = True
+            self._logger.info("MPCCamera started.")
             return
 
         # --- Real VmbPy Camera Logic ---

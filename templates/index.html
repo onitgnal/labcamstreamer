@@ -32,6 +32,48 @@
         </div>
       </section>
 
+      <section class="panel" id="mpcPanel" hidden>
+        <h2>MPC Camera</h2>
+        <label class="row space">
+          <span>k</span>
+          <input id="mpcK" type="number" min="1" step="1" />
+        </label>
+        <label class="row space">
+          <span>N</span>
+          <input id="mpcN" type="number" min="2" step="1" />
+        </label>
+        <label class="row space">
+          <span>R (m)</span>
+          <input id="mpcR" type="number" step="any" placeholder="0.5" />
+        </label>
+        <label class="row space">
+          <span>lambda (nm)</span>
+          <input id="mpcLambda" type="number" step="any" placeholder="1030" />
+        </label>
+        <label class="row space">
+          <span>n</span>
+          <input id="mpcNIndex" type="number" step="any" placeholder="1.0" />
+        </label>
+        <div class="mpc-derived">
+          <div class="row space">
+            <span>C</span>
+            <span id="mpcC" class="mono">-</span>
+          </div>
+          <div class="row space">
+            <span>L</span>
+            <span id="mpcL" class="mono">-</span>
+          </div>
+          <div class="row space">
+            <span>w0 (center)</span>
+            <span id="mpcW0" class="mono">-</span>
+          </div>
+          <div class="row space">
+            <span>wm (mirror)</span>
+            <span id="mpcWm" class="mono">-</span>
+          </div>
+        </div>
+      </section>
+
       <section class="panel">
         <h2>Data Export</h2>
         <button id="saveAllBtn" class="primary">Save All</button>
@@ -286,6 +328,5 @@
   <div id="toastContainer" class="toast-container"></div>
 </body>
 </html>
-
 
 

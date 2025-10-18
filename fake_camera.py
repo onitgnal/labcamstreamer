@@ -1,7 +1,9 @@
 import logging
+import math
 import threading
 import time
-from typing import Callable, Optional, Tuple
+from dataclasses import dataclass
+from typing import Callable, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -81,6 +83,126 @@ class FakeFrame(Frame):
         else:
             # For simplicity, we don't support other conversions
             raise TypeError(f"Unsupported pixel format conversion to {target_format}")
+
+# ----- MPC parameter modeling -----
+
+@dataclass(frozen=True)
+class MPCParameters:
+    """Design parameters for the synthetic Herriott-type multi-pass cell."""
+    k: int = 1
+    N: int = 24
+    R: float = 0.5               # meters
+    wavelength: float = 1030e-9  # meters
+    n: float = 1.0               # refractive index
+
+    def validate(self) -> "MPCParameters":
+        if self.N < 2:
+            raise ValueError("N must be at least 2.")
+        if self.N > 400:
+            raise ValueError("N must be <= 400 to keep the MPC simulation responsive.")
+        if self.k < 1 or self.k >= self.N:
+            raise ValueError("k must be between 1 and N-1.")
+        if self.R <= 0:
+            raise ValueError("R must be positive.")
+        if self.wavelength <= 0:
+            raise ValueError("Wavelength must be positive.")
+        if self.n <= 0:
+            raise ValueError("Refractive index n must be positive.")
+        C = 1.0 - math.cos(math.pi * self.k / self.N)
+        if not (0.0 < C < 2.0):
+            raise ValueError("The selected k and N combination would make the cell unstable (C outside (0, 2)).")
+        return self
+
+    def with_updates(self, **kwargs: object) -> "MPCParameters":
+        data = {
+            "k": self.k,
+            "N": self.N,
+            "R": self.R,
+            "wavelength": self.wavelength,
+            "n": self.n,
+        }
+
+        if "k" in kwargs and kwargs["k"] is not None:
+            try:
+                data["k"] = int(kwargs["k"])
+            except (TypeError, ValueError):
+                raise ValueError("k must be an integer.")
+
+        if "N" in kwargs and kwargs["N"] is not None:
+            try:
+                data["N"] = int(kwargs["N"])
+            except (TypeError, ValueError):
+                raise ValueError("N must be an integer.")
+
+        if "R" in kwargs and kwargs["R"] is not None:
+            try:
+                data["R"] = float(kwargs["R"])
+            except (TypeError, ValueError):
+                raise ValueError("R must be a number.")
+
+        wavelength_keys = ("wavelength_nm", "lambda_nm", "wavelength", "lambda")
+        for key in wavelength_keys:
+            if key in kwargs and kwargs[key] is not None:
+                try:
+                    if key.endswith("_nm"):
+                        data["wavelength"] = float(kwargs[key]) * 1e-9
+                    else:
+                        data["wavelength"] = float(kwargs[key])
+                except (TypeError, ValueError):
+                    raise ValueError("Wavelength must be a number.")
+                break
+
+        if "n" in kwargs and kwargs["n"] is not None:
+            try:
+                data["n"] = float(kwargs["n"])
+            except (TypeError, ValueError):
+                raise ValueError("n must be a number.")
+
+        return MPCParameters(**data).validate()
+
+    def derived(self) -> Dict[str, float]:
+        params = self.validate()
+        xi = 2.0 * math.pi * params.k / params.N
+        C = 1.0 - math.cos(math.pi * params.k / params.N)
+        lambda_medium = params.wavelength / params.n
+        if lambda_medium <= 0:
+            raise ValueError("The effective wavelength λ/n must be positive.")
+
+        stability_term = max(C * (2.0 - C), 0.0)
+        sqrt_term = math.sqrt(stability_term)
+
+        zr = 0.5 * params.R * sqrt_term
+        w0_sq = (params.R * lambda_medium / (2.0 * math.pi)) * sqrt_term
+        w0 = math.sqrt(max(w0_sq, 0.0))
+
+        denom = 2.0 - C
+        if denom <= 0.0:
+            raise ValueError("Derived denominator became non-positive; check k/N.")
+        sqrt_ratio = math.sqrt(max(C / denom, 0.0))
+        wm_sq = (params.R * lambda_medium / math.pi) * sqrt_ratio
+        wm = math.sqrt(max(wm_sq, 0.0))
+
+        return {
+            "xi_rad": float(xi),
+            "C": float(C),
+            "L_m": float(params.R * C),
+            "lambda_medium_m": float(lambda_medium),
+            "zr_m": float(zr),
+            "w0_m": float(w0),
+            "wm_m": float(wm),
+        }
+
+    def to_payload(self) -> Dict[str, object]:
+        derived = self.derived()
+        return {
+            "k": self.k,
+            "N": self.N,
+            "R": float(self.R),
+            "wavelength_m": float(self.wavelength),
+            "wavelength_nm": float(self.wavelength * 1e9),
+            "n": float(self.n),
+            "derived": derived,
+        }
 
 # ----- The main FakeCamera class -----
 
@@ -312,6 +434,150 @@ class FakeCamera:
 
         final_frame = np.clip(noisy_frame, 0, 65535).astype(np.uint16)
         return final_frame
+
+
+class MPCCamera(FakeCamera):
+    """
+    A specialized FakeCamera that renders a Herriott multi-pass cell spot pattern.
+    The user-configurable MPCParameters drive both the simulated beam geometry and
+    the derived design metrics that are reported through the API/UI.
+    """
+
+    def __init__(self, camera_id: str, logger: logging.Logger, parameters: Optional[MPCParameters] = None):
+        super().__init__(camera_id=camera_id, logger=logger)
+        self._param_lock = threading.Lock()
+        self._parameters = (parameters or MPCParameters()).validate()
+        self._derived = self._parameters.derived()
+        self._phase = 0.0
+        self._phase_increment = self._compute_phase_increment(self._derived["xi_rad"], self._parameters.N)
+        self._base_amplitude = (self.amplitude_range[0] + self.amplitude_range[1]) * 0.5
+        self.drift_position_std_dev = 0.0
+        self.max_amplitude_variation = 0.02
+        self.background_gradient_strength = 200.0
+        self.background_level = 800
+        self.background_noise_fraction = min(self.background_noise_fraction, 0.2)
+        self.read_noise_fraction = min(self.read_noise_fraction, 0.1)
+        self.background_noise_std = max(1.0, self.background_noise_std * 0.5)
+        self.read_noise_level = max(1.0, self.read_noise_level * 0.5)
+        self._needs_rebuild = True
+        self._recompute_geometry_locked()
+
+    @staticmethod
+    def _compute_phase_increment(xi: float, passes: int) -> float:
+        if passes <= 0 or abs(xi) < 1e-9:
+            return 0.0
+        return xi / max(passes, 1) * 0.25
+
+    def _recompute_geometry_locked(self) -> None:
+        """Recalculate pixel-space geometry derived from the analytic solution."""
+        derived = self._derived
+        min_dim = float(min(self.width, self.height))
+        w0 = max(derived["w0_m"], 1e-12)
+        wm = max(derived["wm_m"], w0)
+        ratio = max(1.0, min(wm / w0, 50.0))
+
+        density_scale = min(1.0, 64.0 / max(self._parameters.N, 1))
+        radius = min_dim * (0.2 + 0.015 * ratio)
+        if density_scale < 1.0:
+            radius *= density_scale ** 0.5
+        radius = float(max(min_dim * 0.18, min(radius, min_dim * 0.45)))
+
+        sigma = min_dim * 0.01 * math.sqrt(ratio)
+        sigma = float(max(4.0, min(sigma, min_dim * 0.09)))
+
+        self._circle_radius_px = radius
+        self._sigma_base_px = sigma
+
+    def set_parameters(self, params: MPCParameters) -> None:
+        params = params.validate()
+        with self._param_lock:
+            self._parameters = params
+            self._derived = params.derived()
+            self._phase = 0.0
+            self._phase_increment = self._compute_phase_increment(self._derived["xi_rad"], params.N)
+            self._base_amplitude = (self.amplitude_range[0] + self.amplitude_range[1]) * 0.5
+            self._recompute_geometry_locked()
+            self._needs_rebuild = True
+
+    def get_parameters(self) -> MPCParameters:
+        with self._param_lock:
+            return self._parameters
+
+    def get_payload(self) -> Dict[str, object]:
+        with self._param_lock:
+            return self._parameters.to_payload()
+
+    def _initialize_beams(self):
+        with self._param_lock:
+            params = self._parameters
+            derived = self._derived
+            radius = self._circle_radius_px
+            sigma = self._sigma_base_px
+        self._beams = []
+        cx, cy = self.width / 2.0, self.height / 2.0
+        xi = derived["xi_rad"]
+        jitter_scale = sigma * 0.15
+
+        for idx in range(params.N):
+            theta = self._phase + idx * xi
+            radial_offset = float(self._rng.normal(0.0, jitter_scale * 0.3))
+            sigma_major = max(2.0, sigma * (1.05 + 0.1 * math.sin(theta)))
+            sigma_minor = max(2.0, sigma * (0.95 - 0.1 * math.sin(theta)))
+            angle = 0.5 * theta
+            cov = self._create_covariance_matrix(sigma_major, sigma_minor, angle)
+            amplitude = self._base_amplitude * (0.85 + 0.15 * math.cos(theta))
+            beam = {
+                "index": idx,
+                "center": (
+                    cx + (radius + radial_offset) * math.cos(theta),
+                    cy + (radius + radial_offset) * math.sin(theta),
+                ),
+                "amplitude": float(np.clip(amplitude, 0.0, 60000.0)),
+                "base_amplitude": float(np.clip(amplitude, 0.0, 60000.0)),
+                "cov_matrix": cov,
+                "radial_offset": radial_offset,
+            }
+            self._beams.append(beam)
+
+        self._needs_rebuild = False
+
+    def _update_beams(self):
+        with self._param_lock:
+            params = self._parameters
+            derived = self._derived
+            radius = self._circle_radius_px
+            sigma = self._sigma_base_px
+
+        if self._needs_rebuild or len(self._beams) != params.N:
+            self._phase = 0.0
+            self._initialize_beams()
+            return
+
+        xi = derived["xi_rad"]
+        self._phase = (self._phase + self._phase_increment) % (2.0 * math.pi)
+        cx, cy = self.width / 2.0, self.height / 2.0
+
+        for beam in self._beams:
+            idx = beam.get("index", 0)
+            theta = self._phase + idx * xi
+
+            radial_offset = beam.get("radial_offset", 0.0)
+            new_offset = 0.98 * radial_offset + self._rng.normal(0.0, sigma * 0.01)
+            beam["radial_offset"] = float(np.clip(new_offset, -sigma, sigma))
+
+            effective_radius = radius + beam["radial_offset"]
+            beam["center"] = (
+                cx + effective_radius * math.cos(theta),
+                cy + effective_radius * math.sin(theta),
+            )
+
+            modulation = 0.1 * math.sin(theta * 2.0)
+            beam["amplitude"] = float(np.clip(beam["base_amplitude"] * (1.0 + modulation), 0.0, 60000.0))
+
+            sigma_major = max(2.0, sigma * (1.05 + 0.08 * math.cos(theta + 0.3)))
+            sigma_minor = max(2.0, sigma * (0.95 - 0.08 * math.cos(theta + 0.3)))
+            angle = 0.5 * theta
+            beam["cov_matrix"] = self._create_covariance_matrix(sigma_major, sigma_minor, angle)
 
 # Example usage (for testing)
 if __name__ == '__main__':

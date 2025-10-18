@@ -16,6 +16,20 @@
   const startBgSubtractionBtn = qs('#startBgSubtraction');
   const numFramesInput = qs('#numFrames');
   const autoExposureBtn = qs('#autoExposureBtn');
+  const mpcPanel = qs('#mpcPanel');
+  const mpcInputs = {
+    k: qs('#mpcK'),
+    N: qs('#mpcN'),
+    R: qs('#mpcR'),
+    lambda: qs('#mpcLambda'),
+    n: qs('#mpcNIndex'),
+  };
+  const mpcOutputs = {
+    C: qs('#mpcC'),
+    L: qs('#mpcL'),
+    w0: qs('#mpcW0'),
+    wm: qs('#mpcWm'),
+  };
 
   const expSlider = qs('#expSlider');
   const expLabel = qs('#expLabel');
@@ -88,6 +102,7 @@
     selectedId: null,
     naturalW: 0,
     naturalH: 0,
+    cameraId: null,
     // Interaction
     mouse: { x:0, y:0, down:false },
     drag: null,               // {mode:'move'|'resize'|'create', roiId, start:{x,y}, orig:{x,y,w,h}, handle:null}
@@ -121,6 +136,8 @@
   let autoExposureEnabled = false;
   let autoExposureLoopTimer = null;
   let autoExposureBusy = false;
+  let mpcConfigCache = null;
+  let mpcUpdateTimer = null;
   // ----- REST helpers -----
   async function logToServer(level, message, data) {
     try {
@@ -164,6 +181,132 @@
       logToServer('error', 'Failed to reset max for ROI', { roiId, error: e.toString() });
     }
   }
+
+  function formatNumber(value, fractionDigits = 3) {
+    if (!Number.isFinite(value)) return '-';
+    try {
+      return Number(value).toFixed(fractionDigits);
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  function formatLengthMeters(m) {
+    if (!Number.isFinite(m)) return '-';
+    const abs = Math.abs(m);
+    if (abs >= 0.1) return `${(m * 1000).toFixed(2)} mm`;
+    if (abs >= 1e-3) return `${(m * 1000).toFixed(2)} mm`;
+    if (abs >= 1e-6) return `${(m * 1e6).toFixed(1)} um`;
+    if (abs >= 1e-9) return `${(m * 1e9).toFixed(1)} nm`;
+    return `${m.toExponential(2)} m`;
+  }
+
+  function applyMpcConfig(config) {
+    if (!config) return;
+    mpcConfigCache = config;
+
+    if (mpcInputs.k) mpcInputs.k.value = config.k != null ? String(config.k) : '';
+    if (mpcInputs.N) mpcInputs.N.value = config.N != null ? String(config.N) : '';
+    if (mpcInputs.R) mpcInputs.R.value = Number.isFinite(config.R) ? String(config.R) : '';
+
+    const wavelengthNm = Number.isFinite(config.wavelength_nm)
+      ? config.wavelength_nm
+      : (Number.isFinite(config.wavelength_m) ? config.wavelength_m * 1e9 : null);
+    if (mpcInputs.lambda) mpcInputs.lambda.value = wavelengthNm != null ? String(wavelengthNm) : '';
+
+    if (mpcInputs.n) mpcInputs.n.value = Number.isFinite(config.n) ? String(config.n) : '';
+
+    const derived = config.derived || {};
+    if (mpcOutputs.C) mpcOutputs.C.textContent = formatNumber(derived.C, 6);
+    if (mpcOutputs.L) mpcOutputs.L.textContent = formatLengthMeters(derived.L_m);
+    if (mpcOutputs.w0) mpcOutputs.w0.textContent = formatLengthMeters(derived.w0_m);
+    if (mpcOutputs.wm) mpcOutputs.wm.textContent = formatLengthMeters(derived.wm_m);
+  }
+
+  function setMpcInputsDisabled(disabled) {
+    Object.values(mpcInputs).forEach((input) => {
+      if (input) input.disabled = !!disabled;
+    });
+  }
+
+  function isMpcSelected() {
+    return !!(cameraSelect && cameraSelect.value === 'mpc');
+  }
+
+  async function syncMpcConfig() {
+    if (!mpcPanel) return;
+    try {
+      const cfg = await getJSON('/mpc/config');
+      applyMpcConfig(cfg);
+    } catch (e) {
+      logToServer('error', 'Failed to load MPC config', { error: e.toString() });
+    }
+  }
+
+  function updateMpcPanelVisibility() {
+    if (!mpcPanel) return;
+    const show = isMpcSelected();
+    mpcPanel.hidden = !show;
+    setMpcInputsDisabled(!show);
+    if (show) {
+      syncMpcConfig();
+    }
+  }
+
+  function queueMpcUpdate() {
+    if (mpcUpdateTimer) clearTimeout(mpcUpdateTimer);
+    mpcUpdateTimer = setTimeout(sendMpcUpdate, 250);
+  }
+
+  async function sendMpcUpdate() {
+    if (mpcUpdateTimer) {
+      clearTimeout(mpcUpdateTimer);
+      mpcUpdateTimer = null;
+    }
+    const k = parseInt(mpcInputs.k?.value ?? '', 10);
+    const N = parseInt(mpcInputs.N?.value ?? '', 10);
+    const R = parseFloat(mpcInputs.R?.value ?? '');
+    const wavelengthNm = parseFloat(mpcInputs.lambda?.value ?? '');
+    const nIndex = parseFloat(mpcInputs.n?.value ?? '');
+
+    const valid =
+      Number.isFinite(k) && k >= 1 &&
+      Number.isFinite(N) && N >= 2 &&
+      Number.isFinite(R) && R > 0 &&
+      Number.isFinite(wavelengthNm) && wavelengthNm > 0 &&
+      Number.isFinite(nIndex) && nIndex > 0;
+
+    if (!valid) {
+      showToast('Please provide valid MPC parameters before applying changes.', { variant: 'warning', duration: 4000 });
+      if (mpcConfigCache) applyMpcConfig(mpcConfigCache);
+      return;
+    }
+
+    const payload = {
+      k,
+      N,
+      R,
+      wavelength_nm: wavelengthNm,
+      n: nIndex,
+    };
+
+    try {
+      const res = await postJSON('/mpc/config', payload);
+      applyMpcConfig(res);
+    } catch (e) {
+      logToServer('error', 'Failed to update MPC config', { error: e.toString(), payload });
+      let message = e && e.message ? e.message : String(e);
+      try {
+        const parsed = JSON.parse(message);
+        if (parsed && typeof parsed.error === 'string') {
+          message = parsed.error;
+        }
+      } catch (_) {}
+      showToast(`Failed to update MPC parameters: ${message}`, { variant: 'error', duration: 6000 });
+      if (mpcConfigCache) applyMpcConfig(mpcConfigCache);
+    }
+  }
+
 
   function showToast(message, options = {}) {
     const opts = options || {};
@@ -2126,20 +2269,36 @@
         const opt = document.createElement('option');
         opt.textContent = 'No cameras found';
         cameraSelect.appendChild(opt);
+        updateMpcPanelVisibility();
         return;
       }
       cameraSelect.disabled = false;
       cameraToggle.disabled = false;
+      const previous = state.cameraId || cameraSelect.value || null;
+      let selectedId = null;
       for (const cam of cameras) {
         const opt = document.createElement('option');
         opt.value = cam.id;
         opt.textContent = cam.name;
+        if (cam.id === previous && selectedId === null) {
+          opt.selected = true;
+          selectedId = cam.id;
+        }
         cameraSelect.appendChild(opt);
       }
+      if (selectedId) {
+        cameraSelect.value = selectedId;
+      } else if (cameras.length > 0) {
+        selectedId = cameras[0].id;
+        cameraSelect.value = selectedId;
+      }
+      state.cameraId = selectedId;
+      updateMpcPanelVisibility();
     } catch (e) {
       logToServer('error', 'Failed to get camera list', { error: e.toString() });
       cameraSelect.disabled = true;
       cameraToggle.disabled = true;
+      updateMpcPanelVisibility();
     }
   }
 
@@ -2185,6 +2344,18 @@
     } catch (_) {}
   });
 
+  Object.values(mpcInputs).forEach((input) => {
+    if (!input) return;
+    input.addEventListener('change', queueMpcUpdate);
+  });
+
+  if (cameraSelect) {
+    cameraSelect.addEventListener('change', () => {
+      state.cameraId = cameraSelect.value;
+      updateMpcPanelVisibility();
+    });
+  }
+
   cameraToggle.addEventListener('change', async () => {
     const enabled = cameraToggle.checked;
     const cameraId = cameraSelect.value;
@@ -2197,6 +2368,11 @@
       cameraSelect.disabled = success;
       setAutoExposureDisabled(!success);
       stream.src = success ? '/video_feed?ts=' + Date.now() : '';
+      state.cameraId = cameraId;
+      updateMpcPanelVisibility();
+      if (success && cameraId === 'mpc') {
+        syncMpcConfig().catch(() => {});
+      }
       if (!success && res.error) {
         logToServer('error', 'Failed to toggle camera', { error: res.error });
         alert(`Error: ${res.error}`);
@@ -2206,6 +2382,8 @@
       cameraToggle.checked = !enabled;
       cameraSelect.disabled = !enabled;
       setAutoExposureDisabled(!cameraToggle.checked);
+      state.cameraId = cameraSelect.value;
+      updateMpcPanelVisibility();
     }
   });
 
@@ -2408,7 +2586,3 @@
     }
   })();
 })();
-
-
-
-

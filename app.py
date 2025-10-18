@@ -1656,6 +1656,23 @@ def camera_toggle():
         app.logger.error(f"Failed to toggle camera: {e}", exc_info=True)
     return jsonify({"enabled": cam_service.is_running(), "error": err})
 
+
+@app.route("/mpc/config", methods=["GET", "POST"])
+def mpc_config():
+    if request.method == "GET":
+        cfg = cam_service.get_mpc_config()
+        return jsonify(cfg)
+
+    data = request.get_json(silent=True) or {}
+    try:
+        updated = cam_service.update_mpc_config(data)
+        return jsonify(updated)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.error(f"Failed to update MPC config: {e}", exc_info=True)
+        return jsonify({"error": "Unexpected error while updating MPC parameters."}), 500
+
 # ROI CRUD
 @app.route("/rois", methods=["GET", "POST"])
 def rois():

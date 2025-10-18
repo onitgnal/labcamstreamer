@@ -198,6 +198,15 @@ body{
   align-items:center;
   gap:12px;
 }
+
+#mpcPanel .mpc-derived{
+  margin-top:8px;
+  display:grid;
+  gap:6px;
+}
+#mpcPanel .mpc-derived .row{
+  gap:12px;
+}
 .background-controls .background-toggle{
   flex:1 1 auto;
   justify-content:space-between;
