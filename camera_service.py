@@ -434,7 +434,7 @@ class CameraService:
             except (VmbFeatureError, AttributeError, TypeError, ValueError):
                 inc = None
 
-            ui_min, ui_max, ui_step = 1000, 50000, 1000
+            ui_min, ui_max, ui_step = 1000, 100000, 1000
             requested = float(requested_us)
 
             target = max(min_v, min(max_v, requested))
