@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import threading
 import time
@@ -110,6 +111,21 @@ class CameraService:
         def __call__(self, cam: Union[Camera, FakeCamera], stream: Optional[Stream], frame: Union[Frame, FakeFrame]):
             try:
                 if frame.get_status() == FrameStatus.Complete:
+                    sensor_gray = None
+                    try:
+                        sensor_data = frame.as_numpy_ndarray()
+                    except AttributeError:
+                        sensor_data = None
+                    except Exception:
+                        sensor_data = None
+                    if sensor_data is not None:
+                        sensor_arr = np.asarray(sensor_data)
+                        if sensor_arr.ndim == 3 and sensor_arr.shape[-1] == 1:
+                            sensor_arr = sensor_arr[..., 0]
+                        elif sensor_arr.ndim == 3 and sensor_arr.shape[-1] >= 3:
+                            sensor_arr = sensor_arr.max(axis=2)
+                        sensor_gray = np.ascontiguousarray(sensor_arr)
+
                     # Convert to BGR8 if needed for OpenCV/JPEG
                     if frame.get_pixel_format() == OPENCV_DISPLAY_FORMAT:
                         display = frame
@@ -138,6 +154,11 @@ class CameraService:
                         self.service._latest_gray_raw = gray_raw.copy()
                         self.service._latest_bgr = final_bgr.copy()
                         self.service._latest_gray = final_gray.copy()
+                        if sensor_gray is not None and sensor_gray.size > 0:
+                            self.service._latest_sensor_raw = sensor_gray.copy()
+
+                    if sensor_gray is not None and sensor_gray.size > 0:
+                        self.service._update_sensor_observation(sensor_gray)
 
                     # Push to display queue (drop if full to keep latency low)
                     try:
@@ -172,17 +193,208 @@ class CameraService:
         self._frame_lock = threading.Lock()
         self._exposure_lock = threading.Lock()
         self._colormap_lock = threading.Lock()
+        self._sensor_lock = threading.Lock()
 
         self._latest_bgr: Optional[np.ndarray] = None
         self._latest_gray: Optional[np.ndarray] = None
         self._latest_gray_raw: Optional[np.ndarray] = None
+        self._latest_sensor_raw: Optional[np.ndarray] = None
         self._colormap: str = "jet"
         self._background_frame: Optional[np.ndarray] = None
         self._background_subtraction_enabled = False
+        self._sensor_max_value: Optional[float] = None
+        self._sensor_max_dtype: Optional[np.dtype] = None
+        self._sensor_last_observed_peak: float = 0.0
 
     def set_default_camera_id(self, camera_id: str):
         self._logger.info(f"Default camera ID set to: {camera_id}")
         self._default_camera_id = camera_id
+
+    def _reset_sensor_calibration(self) -> None:
+        with self._sensor_lock:
+            self._sensor_max_value = None
+            self._sensor_max_dtype = None
+            self._sensor_last_observed_peak = 0.0
+
+    def _update_sensor_observation(self, sensor_frame: np.ndarray) -> None:
+        if sensor_frame is None or sensor_frame.size == 0:
+            return
+        peak = float(np.max(sensor_frame))
+        if not np.isfinite(peak):
+            return
+        dtype = sensor_frame.dtype
+        with self._sensor_lock:
+            if self._sensor_max_dtype is not None and self._sensor_max_dtype != dtype:
+                # Sensor output type changed; discard previous calibration.
+                self._sensor_max_value = None
+                self._sensor_last_observed_peak = 0.0
+            self._sensor_max_dtype = dtype
+            if peak > self._sensor_last_observed_peak:
+                self._sensor_last_observed_peak = peak
+            if (
+                self._sensor_max_value is not None
+                and self._sensor_max_dtype == dtype
+                and peak > self._sensor_max_value
+            ):
+                bits = self._estimate_integer_bit_depth(peak)
+                candidate = self._integer_level_from_bits(bits)
+                dtype_max = self._dtype_max_from_dtype(dtype)
+                candidate = min(dtype_max, max(candidate, peak))
+                self._sensor_max_value = candidate
+
+    @staticmethod
+    def _dtype_max_from_dtype(dtype: np.dtype) -> float:
+        try:
+            if np.issubdtype(dtype, np.integer):
+                info = np.iinfo(dtype)
+                return float(info.max)
+            if np.issubdtype(dtype, np.floating):
+                finfo = np.finfo(dtype)
+                return float(finfo.max)
+        except (ValueError, TypeError):
+            pass
+        # Fallback: assume full-range unsigned integer.
+        try:
+            bits = np.dtype(dtype).itemsize * 8
+            return float((1 << bits) - 1)
+        except Exception:
+            return 1.0
+
+    @staticmethod
+    def _integer_level_from_bits(bits: int) -> float:
+        if bits <= 0:
+            return 0.0
+        try:
+            return float((1 << bits) - 1)
+        except OverflowError:
+            return float((1 << 31) - 1)
+
+    @staticmethod
+    def _estimate_integer_bit_depth(value: float) -> int:
+        if not np.isfinite(value) or value <= 0.0:
+            return 0
+        return int(math.ceil(math.log2(value + 1.0)))
+
+    def _collect_sensor_peak(self, *, samples: int = 6, timeout: float = 0.3) -> float:
+        peak = 0.0
+        for _ in range(max(1, samples)):
+            if not self.wait_for_frame_signal(timeout=timeout):
+                continue
+            frame = self.get_latest_sensor_raw()
+            if frame is None or frame.size == 0:
+                continue
+            sample_peak = float(np.max(frame))
+            if not np.isfinite(sample_peak):
+                continue
+            peak = max(peak, sample_peak)
+        return peak
+
+    def _measure_peak_at_extreme_exposure(self) -> float:
+        try:
+            feat = self._get_exposure_feature()
+        except Exception:
+            return 0.0
+        try:
+            min_exp, max_exp = feat.get_range()
+        except (VmbFeatureError, TypeError, ValueError):
+            return 0.0
+
+        current_exp = max(1, self.get_exposure_us())
+        try:
+            target_exp = int(round(float(max_exp)))
+        except Exception:
+            target_exp = current_exp
+
+        if target_exp <= 0:
+            return 0.0
+
+        if target_exp == current_exp:
+            return self._collect_sensor_peak(samples=8, timeout=0.3)
+
+        applied = self.set_exposure_us(target_exp)
+        if applied != target_exp:
+            target_exp = applied
+        try:
+            return self._collect_sensor_peak(samples=8, timeout=0.35)
+        finally:
+            if target_exp != current_exp:
+                self.set_exposure_us(current_exp)
+                # Wait for a couple of frames to flush the high-exposure measurement.
+                self._collect_sensor_peak(samples=3, timeout=0.2)
+
+    def _measure_sensor_max_value(self, sample: Optional[np.ndarray]) -> float:
+        if sample is not None and sample.size > 0:
+            dtype = sample.dtype
+        else:
+            latest = self.get_latest_sensor_raw()
+            if latest is not None and latest.size > 0:
+                dtype = latest.dtype
+                sample = latest
+            else:
+                raw = self.get_latest_gray(raw=True)
+                if raw is None or raw.size == 0:
+                    return 255.0
+                dtype = raw.dtype
+                sample = raw
+
+        dtype_max = self._dtype_max_from_dtype(dtype)
+        if dtype_max <= 0.0 or not np.isfinite(dtype_max):
+            dtype_max = 1.0
+
+        observed_peak = 0.0
+        if sample is not None and sample.size > 0:
+            observed_peak = max(observed_peak, float(np.max(sample)))
+
+        observed_peak = max(observed_peak, self._collect_sensor_peak(samples=6, timeout=0.25))
+
+        bits = self._estimate_integer_bit_depth(observed_peak)
+        candidate_max = self._integer_level_from_bits(bits)
+        if candidate_max <= 0.0 or not np.isfinite(candidate_max):
+            candidate_max = dtype_max
+        candidate_max = min(dtype_max, max(candidate_max, observed_peak))
+
+        need_extreme_check = (
+            candidate_max >= dtype_max * 0.95
+            or observed_peak < 0.1 * dtype_max
+        )
+        if need_extreme_check:
+            extreme_peak = self._measure_peak_at_extreme_exposure()
+            if extreme_peak > observed_peak:
+                observed_peak = extreme_peak
+                bits = self._estimate_integer_bit_depth(observed_peak)
+                candidate_max = self._integer_level_from_bits(bits)
+                if candidate_max <= 0.0 or not np.isfinite(candidate_max):
+                    candidate_max = dtype_max
+                candidate_max = min(dtype_max, max(candidate_max, observed_peak))
+
+        if candidate_max < dtype_max:
+            return max(1.0, candidate_max)
+
+        return max(1.0, dtype_max)
+
+    def _ensure_sensor_max_value(self, sample: Optional[np.ndarray] = None) -> float:
+        dtype = None
+        if sample is not None and sample.size > 0:
+            dtype = sample.dtype
+
+        with self._sensor_lock:
+            if (
+                self._sensor_max_value is not None
+                and self._sensor_max_dtype is not None
+                and (dtype is None or self._sensor_max_dtype == dtype)
+            ):
+                return self._sensor_max_value
+
+        measured = self._measure_sensor_max_value(sample)
+
+        with self._sensor_lock:
+            if dtype is None and sample is not None and sample.size > 0:
+                dtype = sample.dtype
+            if dtype is None and self._sensor_max_dtype is not None:
+                dtype = self._sensor_max_dtype
+            self._sensor_max_value = measured
+            self._sensor_max_dtype = dtype
+        return measured
 
     # ---------- Lifecycle ----------
 
@@ -201,6 +413,13 @@ class CameraService:
     def start(self, camera_id: Optional[str] = None) -> None:
         if self._running:
             return
+
+        with self._frame_lock:
+            self._latest_bgr = None
+            self._latest_gray = None
+            self._latest_gray_raw = None
+            self._latest_sensor_raw = None
+        self._reset_sensor_calibration()
 
         target_camera_id = camera_id or self._default_camera_id
         self._logger.info(f"Attempting to start camera: {target_camera_id}")
@@ -285,6 +504,9 @@ class CameraService:
 
             self._running = False
             self._active_camera_id = None
+            with self._frame_lock:
+                self._latest_sensor_raw = None
+            self._reset_sensor_calibration()
             self._logger.info("Camera stopped.")
 
     def is_running(self) -> bool:
@@ -390,7 +612,7 @@ class CameraService:
             except (VmbFeatureError, AttributeError, TypeError, ValueError):
                 inc = None
 
-            ui_min, ui_max, ui_step = 1000, 150000, 1000
+            ui_min, ui_max, ui_step = 1, 1e6, 1000
             requested = float(requested_us)
 
             target = max(min_v, min(max_v, requested))
@@ -456,6 +678,7 @@ class CameraService:
         if not self.is_running():
             raise RuntimeError("Camera must be running to auto-adjust exposure.")
 
+        sensor_frame = self.get_latest_sensor_raw()
         raw_frame = self.get_latest_gray(raw=True)
         processed_frame = self.get_latest_gray()
 
@@ -471,14 +694,31 @@ class CameraService:
         if np.issubdtype(frame_arr.dtype, np.integer):
             frame_scale = float(np.iinfo(frame_arr.dtype).max)
         else:
-            frame_scale = float(np.max(np.abs(frame_arr.astype(np.float32))))
-            if not np.isfinite(frame_scale) or frame_scale <= 0.0:
-                frame_scale = frame_peak
+                frame_scale = float(np.max(np.abs(frame_arr.astype(np.float32))))
+                if not np.isfinite(frame_scale) or frame_scale <= 0.0:
+                    frame_scale = frame_peak
         frame_fraction = frame_peak / max(frame_scale, 1e-6)
 
-        raw_peak = frame_peak
-        raw_scale = frame_scale
-        if raw_frame is not None and getattr(raw_frame, "size", 0) > 0:
+        sensor_arr = None
+        sensor_peak = 0.0
+        sensor_scale = None
+        if sensor_frame is not None and getattr(sensor_frame, "size", 0) > 0:
+            sensor_arr = np.asarray(sensor_frame)
+            sensor_peak = float(np.max(sensor_arr))
+            if not np.isfinite(sensor_peak) or sensor_peak < 0.0:
+                sensor_peak = 0.0
+            try:
+                sensor_scale = self._ensure_sensor_max_value(sensor_arr)
+            except Exception as exc:
+                self._logger.debug(f"Sensor max calibration failed: {exc}")
+                sensor_scale = None
+            if sensor_scale is not None and (not np.isfinite(sensor_scale) or sensor_scale <= 0.0):
+                sensor_scale = None
+
+        using_sensor = sensor_scale is not None and sensor_scale > 0.0
+        raw_peak = sensor_peak if using_sensor else frame_peak
+        raw_scale = sensor_scale if using_sensor else frame_scale
+        if not using_sensor and raw_frame is not None and getattr(raw_frame, "size", 0) > 0:
             raw_arr = np.asarray(raw_frame)
             raw_peak = float(np.max(raw_arr))
             if np.issubdtype(raw_arr.dtype, np.integer):
@@ -487,7 +727,11 @@ class CameraService:
                 raw_scale = float(np.max(np.abs(raw_arr.astype(np.float32))))
                 if not np.isfinite(raw_scale) or raw_scale <= 0.0:
                     raw_scale = raw_peak
+
+        if not np.isfinite(raw_scale) or raw_scale <= 0.0:
+            raw_scale = max(raw_peak, frame_scale, 1.0)
         raw_fraction = raw_peak / max(raw_scale, 1e-6)
+        sensor_fraction = raw_fraction if using_sensor else None
 
         current_exp = max(1, self.get_exposure_us())
         min_exp = 10.0
@@ -542,17 +786,19 @@ class CameraService:
         if delta > tolerance and gain_auto_available and (hit_lower or hit_upper):
             gain_triggered = self._trigger_gain_auto_once()
 
+        peak_label = "sensor peak" if using_sensor else "raw peak"
+
         if delta <= tolerance:
             message = "Exposure already within target range."
         elif changed:
             message = (
                 f"Exposure adjusted from {current_exp}us to {applied}us "
-                f"(raw peak {raw_peak:.1f}/{raw_scale:.0f})."
+                f"({peak_label} {raw_peak:.1f}/{raw_scale:.0f})."
             )
         else:
             limit = "minimum" if hit_lower else "maximum"
             message = (
-                f"Exposure change limited by camera {limit} (raw peak {raw_peak:.1f}/{raw_scale:.0f})."
+                f"Exposure change limited by camera {limit} ({peak_label} {raw_peak:.1f}/{raw_scale:.0f})."
             )
         if gain_triggered:
             message += " Gain auto was triggered."
@@ -567,6 +813,9 @@ class CameraService:
             "frame_peak_fraction": float(frame_fraction),
             "frame_peak_raw": float(raw_peak),
             "frame_peak_raw_fraction": float(raw_fraction),
+            "sensor_peak": float(sensor_peak) if using_sensor else None,
+            "sensor_peak_fraction": float(sensor_fraction) if sensor_fraction is not None else None,
+            "sensor_max_value": float(sensor_scale) if sensor_scale is not None else None,
             "expected_fraction": float(expected_fraction),
             "changed": bool(changed),
             "gain_auto_available": bool(gain_auto_available),
@@ -638,6 +887,12 @@ class CameraService:
             if src is None:
                 return None
             return src.copy()
+
+    def get_latest_sensor_raw(self) -> Optional[np.ndarray]:
+        with self._frame_lock:
+            if self._latest_sensor_raw is None:
+                return None
+            return self._latest_sensor_raw.copy()
 
     def get_background_frame(self) -> Optional[np.ndarray]:
         with self._frame_lock:

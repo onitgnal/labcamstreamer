@@ -57,6 +57,10 @@ class FakeFrame(Frame):
     def get_pixel_format(self) -> PixelFormat:
         return self._format
 
+    def as_numpy_ndarray(self) -> np.ndarray:
+        """Return a copy of the underlying frame data as a NumPy array."""
+        return self._data.copy()
+
     def as_opencv_image(self) -> np.ndarray:
         # Note: This is simplified. A real implementation would need to handle
         # various pixel format conversions more robustly.
