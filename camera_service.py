@@ -533,8 +533,14 @@ class CameraService:
                 drop_count += 1
 
         trimmed = candidates[drop_count:]
+        if drop_count > 0:
+            suspect = candidates[:drop_count]
+            if trimmed.size < hot_cluster_min or suspect.size <= 4:
+                keep = max(drop_count, min(hot_cluster_min, candidates.size))
+                trimmed = candidates[:keep]
+                drop_count = 0
+
         if trimmed.size == 0:
-            # If everything above threshold was trimmed, fall back to the trailing window.
             tail_count = min(hot_cluster_min, candidates.size)
             trimmed = candidates[-tail_count:]
             drop_count = max(0, candidates.size - trimmed.size)
@@ -553,6 +559,8 @@ class CameraService:
             stats["hot_gap"] = float(candidates[drop_count - 1] / max(candidates[drop_count], 1e-6))
         else:
             stats["hot_gap"] = 1.0 if drop_count == 0 else float("inf")
+        if stats["cluster_size"] <= 3:
+            stats["robust"] = float(stats["max"])
         return stats
 
     # ---------- Lifecycle ----------
