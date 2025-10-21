@@ -112,19 +112,20 @@ class CameraService:
             try:
                 if frame.get_status() == FrameStatus.Complete:
                     sensor_gray = None
-                    try:
-                        sensor_data = frame.as_numpy_ndarray()
-                    except AttributeError:
-                        sensor_data = None
-                    except Exception:
-                        sensor_data = None
-                    if sensor_data is not None:
-                        sensor_arr = np.asarray(sensor_data)
-                        if sensor_arr.ndim == 3 and sensor_arr.shape[-1] == 1:
-                            sensor_arr = sensor_arr[..., 0]
-                        elif sensor_arr.ndim == 3 and sensor_arr.shape[-1] >= 3:
-                            sensor_arr = sensor_arr.max(axis=2)
-                        sensor_gray = np.ascontiguousarray(sensor_arr)
+                    if self.service._sensor_capture_enabled_state():
+                        try:
+                            sensor_data = frame.as_numpy_ndarray()
+                        except AttributeError:
+                            sensor_data = None
+                        except Exception:
+                            sensor_data = None
+                        if sensor_data is not None:
+                            sensor_arr = np.asarray(sensor_data)
+                            if sensor_arr.ndim == 3 and sensor_arr.shape[-1] == 1:
+                                sensor_arr = sensor_arr[..., 0]
+                            elif sensor_arr.ndim == 3 and sensor_arr.shape[-1] >= 3:
+                                sensor_arr = sensor_arr.max(axis=2)
+                            sensor_gray = np.ascontiguousarray(sensor_arr)
 
                     # Convert to BGR8 if needed for OpenCV/JPEG
                     if frame.get_pixel_format() == OPENCV_DISPLAY_FORMAT:
@@ -158,7 +159,7 @@ class CameraService:
                             self.service._latest_sensor_raw = sensor_gray.copy()
 
                     if sensor_gray is not None and sensor_gray.size > 0:
-                        self.service._update_sensor_observation(sensor_gray)
+                        self.service._notify_sensor_frame_captured(sensor_gray)
 
                     # Push to display queue (drop if full to keep latency low)
                     try:
@@ -205,6 +206,9 @@ class CameraService:
         self._sensor_max_value: Optional[float] = None
         self._sensor_max_dtype: Optional[np.dtype] = None
         self._sensor_last_observed_peak: float = 0.0
+        self._sensor_capture_enabled: bool = False
+        self._sensor_capture_event = threading.Event()
+        self._sensor_capture_generation: int = 0
 
     def set_default_camera_id(self, camera_id: str):
         self._logger.info(f"Default camera ID set to: {camera_id}")
@@ -215,6 +219,54 @@ class CameraService:
             self._sensor_max_value = None
             self._sensor_max_dtype = None
             self._sensor_last_observed_peak = 0.0
+            self._sensor_capture_enabled = False
+            self._sensor_capture_generation = 0
+            self._sensor_capture_event.clear()
+
+    def _sensor_capture_enabled_state(self) -> bool:
+        with self._sensor_lock:
+            return self._sensor_capture_enabled
+
+    def _notify_sensor_frame_captured(self, sensor_frame: np.ndarray) -> None:
+        self._update_sensor_observation(sensor_frame)
+        with self._sensor_lock:
+            self._sensor_capture_generation += 1
+            self._sensor_capture_event.set()
+
+    def _fetch_sensor_frame(self, timeout: float = 0.4) -> Optional[np.ndarray]:
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        with self._sensor_lock:
+            if not self._sensor_capture_enabled:
+                self._sensor_capture_enabled = True
+                self._sensor_capture_event.clear()
+            start_generation = self._sensor_capture_generation
+
+        captured: Optional[np.ndarray] = None
+        while True:
+            with self._frame_lock:
+                if self._latest_sensor_raw is not None:
+                    captured = self._latest_sensor_raw.copy()
+            if captured is not None:
+                with self._sensor_lock:
+                    if self._sensor_capture_generation != start_generation:
+                        return captured
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            self._sensor_capture_event.wait(min(remaining, 0.05))
+
+        if captured is None:
+            with self._frame_lock:
+                if self._latest_sensor_raw is not None:
+                    captured = self._latest_sensor_raw.copy()
+        return captured
+
+    def _maybe_disable_sensor_capture(self, *, force: bool = False) -> None:
+        with self._sensor_lock:
+            if force or self._sensor_max_value is not None:
+                self._sensor_capture_enabled = False
+                self._sensor_capture_event.clear()
 
     def _update_sensor_observation(self, sensor_frame: np.ndarray) -> None:
         if sensor_frame is None or sensor_frame.size == 0:
@@ -278,9 +330,7 @@ class CameraService:
     def _collect_sensor_peak(self, *, samples: int = 6, timeout: float = 0.3) -> float:
         peak = 0.0
         for _ in range(max(1, samples)):
-            if not self.wait_for_frame_signal(timeout=timeout):
-                continue
-            frame = self.get_latest_sensor_raw()
+            frame = self._fetch_sensor_frame(timeout=timeout)
             if frame is None or frame.size == 0:
                 continue
             sample_peak = float(np.max(frame))
@@ -309,24 +359,28 @@ class CameraService:
             return 0.0
 
         if target_exp == current_exp:
-            return self._collect_sensor_peak(samples=8, timeout=0.3)
+            peak = self._collect_sensor_peak(samples=8, timeout=0.3)
+            self._maybe_disable_sensor_capture()
+            return peak
 
         applied = self.set_exposure_us(target_exp)
         if applied != target_exp:
             target_exp = applied
         try:
-            return self._collect_sensor_peak(samples=8, timeout=0.35)
+            peak = self._collect_sensor_peak(samples=8, timeout=0.35)
         finally:
             if target_exp != current_exp:
                 self.set_exposure_us(current_exp)
                 # Wait for a couple of frames to flush the high-exposure measurement.
                 self._collect_sensor_peak(samples=3, timeout=0.2)
+            self._maybe_disable_sensor_capture()
+        return peak
 
     def _measure_sensor_max_value(self, sample: Optional[np.ndarray]) -> float:
         if sample is not None and sample.size > 0:
             dtype = sample.dtype
         else:
-            latest = self.get_latest_sensor_raw()
+            latest = self._fetch_sensor_frame(timeout=0.3)
             if latest is not None and latest.size > 0:
                 dtype = latest.dtype
                 sample = latest
@@ -394,6 +448,7 @@ class CameraService:
                 dtype = self._sensor_max_dtype
             self._sensor_max_value = measured
             self._sensor_max_dtype = dtype
+        self._maybe_disable_sensor_capture()
         return measured
 
     def _signal_peak_metrics(
@@ -782,206 +837,210 @@ class CameraService:
         if not self.is_running():
             raise RuntimeError("Camera must be running to auto-adjust exposure.")
 
-        sensor_frame = self.get_latest_sensor_raw()
-        raw_frame = self.get_latest_gray(raw=True)
-        processed_frame = self.get_latest_gray()
-
-        frame = processed_frame if processed_frame is not None and getattr(processed_frame, "size", 0) > 0 else raw_frame
-        if frame is None or getattr(frame, "size", 0) == 0:
-            raise RuntimeError("No frame available for auto exposure.")
-
-        frame_arr = np.asarray(frame)
-        frame_peak = float(np.max(frame_arr))
-        if frame_peak <= 0.0 or not np.isfinite(frame_peak):
-            raise RuntimeError("Frame signal too low for auto exposure.")
-
-        if np.issubdtype(frame_arr.dtype, np.integer):
-            frame_scale = float(np.iinfo(frame_arr.dtype).max)
-        else:
-            frame_scale = float(np.max(np.abs(frame_arr.astype(np.float32))))
-            if not np.isfinite(frame_scale) or frame_scale <= 0.0:
-                frame_scale = frame_peak
-        frame_fraction = frame_peak / max(frame_scale, 1e-6)
-        raw_arr = None
-        raw_metrics = None
-        raw_scale = frame_scale
-        raw_peak_max = frame_peak
-        if raw_frame is not None and getattr(raw_frame, "size", 0) > 0:
-            raw_arr = np.asarray(raw_frame)
-            if np.issubdtype(raw_arr.dtype, np.integer):
-                raw_scale = float(np.iinfo(raw_arr.dtype).max)
-            else:
-                raw_scale = float(np.max(np.abs(raw_arr.astype(np.float32))))
-                if not np.isfinite(raw_scale) or raw_scale <= 0.0:
-                    raw_scale = float(np.max(np.abs(raw_arr)))
-                if not np.isfinite(raw_scale) or raw_scale <= 0.0:
-                    raw_scale = frame_scale
-            raw_metrics = self._signal_peak_metrics(raw_arr)
-            raw_peak_max = max(raw_peak_max, raw_metrics.get("max", frame_peak))
-
-        sensor_arr = None
-        sensor_scale = None
-        sensor_metrics: Optional[Dict[str, float]] = None
-        if sensor_frame is not None and getattr(sensor_frame, "size", 0) > 0:
-            sensor_arr = np.asarray(sensor_frame)
-            try:
-                sensor_scale = self._ensure_sensor_max_value(sensor_arr)
-            except Exception as exc:
-                self._logger.debug(f"Sensor max calibration failed: {exc}")
-                sensor_scale = None
-            if sensor_scale is not None and (not np.isfinite(sensor_scale) or sensor_scale <= 0.0):
-                sensor_scale = None
-            if sensor_scale is not None:
-                sensor_metrics = self._signal_peak_metrics(sensor_arr)
-
-        using_sensor = sensor_scale is not None and sensor_scale > 0.0 and sensor_metrics is not None
-
-        if using_sensor:
-            control_metrics = sensor_metrics
-            control_scale = float(sensor_scale)
-            raw_peak_max = sensor_metrics.get("max", raw_peak_max)
-        elif raw_metrics is not None:
-            control_metrics = raw_metrics
-            control_scale = float(raw_scale)
-        else:
-            control_metrics = None
-            control_scale = float(raw_scale)
-
-        control_peak = float(control_metrics["robust"]) if control_metrics and control_metrics.get("robust", 0.0) > 0.0 else frame_peak
-        if control_peak <= 0.0:
-            control_peak = frame_peak
-            control_scale = frame_scale
-
-        control_scale = max(control_scale, 1e-6)
-        control_fraction = control_peak / control_scale
-        if control_fraction <= 0.0:
-            control_fraction = frame_fraction
-            control_peak = frame_peak
-            control_scale = frame_scale
-
-        sensor_peak = sensor_metrics.get("max") if using_sensor and sensor_metrics else 0.0
-        sensor_peak_robust = sensor_metrics.get("robust") if using_sensor and sensor_metrics else 0.0
-        sensor_fraction = (
-            (sensor_peak_robust or 0.0) / max(float(sensor_scale or 1.0), 1e-6)
-            if using_sensor and sensor_metrics
-            else None
-        )
-        raw_peak_robust = control_peak
-        raw_fraction = control_fraction
-        if not using_sensor and raw_metrics is not None:
-            sensor_peak = 0.0
-            raw_peak_max = raw_metrics.get("max", raw_peak_max)
-        elif not using_sensor:
-            sensor_peak = 0.0
-            raw_peak_max = raw_peak_max
-        raw_cluster_size = (
-            int(sensor_metrics.get("cluster_size", 0)) if using_sensor and sensor_metrics else int(raw_metrics.get("cluster_size", 0) if raw_metrics else 0)
-        )
-        raw_dropped = (
-            int(sensor_metrics.get("dropped", 0)) if using_sensor and sensor_metrics else int(raw_metrics.get("dropped", 0) if raw_metrics else 0)
-        )
-
-        current_exp = max(1, self.get_exposure_us())
-        min_exp = 10.0
-        max_exp = 1_000_000.0
-        inc = None
         try:
-            feat = self._get_exposure_feature()
-            try:
-                min_exp, max_exp = feat.get_range()
-            except (VmbFeatureError, TypeError, ValueError):
-                min_exp, max_exp = 10.0, 1_000_000.0
-            try:
-                inc = feat.get_increment()
-            except (VmbFeatureError, AttributeError):
-                inc = None
-        except Exception:
-            feat = None
+            sensor_frame = self._fetch_sensor_frame(timeout=0.35)
+            raw_frame = self.get_latest_gray(raw=True)
+            processed_frame = self.get_latest_gray()
 
-        min_exp = float(min_exp)
-        max_exp = float(max_exp)
+            frame = processed_frame if processed_frame is not None and getattr(processed_frame, "size", 0) > 0 else raw_frame
+            if frame is None or getattr(frame, "size", 0) == 0:
+                raise RuntimeError("No frame available for auto exposure.")
 
-        factor = target_fraction / max(raw_fraction, 1e-6)
-        unclamped_exp = float(current_exp) * factor
-        desired_exp = unclamped_exp
-        desired_exp = max(min_exp, min(max_exp, desired_exp))
-        if inc:
-            desired_exp = _nearest_with_increment(desired_exp, min_exp, max_exp, inc)
-        desired_int = int(round(desired_exp))
+            frame_arr = np.asarray(frame)
+            frame_peak = float(np.max(frame_arr))
+            if frame_peak <= 0.0 or not np.isfinite(frame_peak):
+                raise RuntimeError("Frame signal too low for auto exposure.")
 
-        applied = self.set_exposure_us(desired_int)
-        changed = applied != current_exp
-        tol = inc if inc else 1.0
-        reduction_requested = factor < 0.999
-        increase_requested = factor > 1.001
-        clamped_lower = unclamped_exp <= min_exp + tol
-        clamped_upper = unclamped_exp >= max_exp - tol
-        hit_lower = clamped_lower or (
-            reduction_requested and (float(applied) <= min_exp + tol or not changed)
-        )
-        hit_upper = clamped_upper or (
-            increase_requested and (float(applied) >= max_exp - tol or not changed)
-        )
+            if np.issubdtype(frame_arr.dtype, np.integer):
+                frame_scale = float(np.iinfo(frame_arr.dtype).max)
+            else:
+                frame_scale = float(np.max(np.abs(frame_arr.astype(np.float32))))
+                if not np.isfinite(frame_scale) or frame_scale <= 0.0:
+                    frame_scale = frame_peak
+            frame_fraction = frame_peak / max(frame_scale, 1e-6)
+            raw_arr = None
+            raw_metrics = None
+            raw_scale = frame_scale
+            raw_peak_max = frame_peak
+            if raw_frame is not None and getattr(raw_frame, "size", 0) > 0:
+                raw_arr = np.asarray(raw_frame)
+                if np.issubdtype(raw_arr.dtype, np.integer):
+                    raw_scale = float(np.iinfo(raw_arr.dtype).max)
+                else:
+                    raw_scale = float(np.max(np.abs(raw_arr.astype(np.float32))))
+                    if not np.isfinite(raw_scale) or raw_scale <= 0.0:
+                        raw_scale = float(np.max(np.abs(raw_arr)))
+                    if not np.isfinite(raw_scale) or raw_scale <= 0.0:
+                        raw_scale = frame_scale
+                raw_metrics = self._signal_peak_metrics(raw_arr)
+                raw_peak_max = max(raw_peak_max, raw_metrics.get("max", frame_peak))
 
-        expected_fraction = raw_fraction * (float(applied) / max(1.0, float(current_exp)))
-        expected_fraction = min(1.0, expected_fraction)
-        delta = abs(expected_fraction - target_fraction)
+            sensor_arr = None
+            sensor_scale = None
+            sensor_metrics: Optional[Dict[str, float]] = None
+            if sensor_frame is not None and getattr(sensor_frame, "size", 0) > 0:
+                sensor_arr = np.asarray(sensor_frame)
+                try:
+                    sensor_scale = self._ensure_sensor_max_value(sensor_arr)
+                except Exception as exc:
+                    self._logger.debug(f"Sensor max calibration failed: {exc}")
+                    sensor_scale = None
+                if sensor_scale is not None and (not np.isfinite(sensor_scale) or sensor_scale <= 0.0):
+                    sensor_scale = None
+                if sensor_scale is not None:
+                    sensor_metrics = self._signal_peak_metrics(sensor_arr)
 
-        gain_auto_feat = self._get_gain_auto_feature()
-        gain_auto_available = gain_auto_feat is not None
-        gain_triggered = False
+            using_sensor = sensor_scale is not None and sensor_scale > 0.0 and sensor_metrics is not None
 
-        if delta > tolerance and gain_auto_available and (hit_lower or hit_upper):
-            gain_triggered = self._trigger_gain_auto_once()
+            if using_sensor:
+                control_metrics = sensor_metrics
+                control_scale = float(sensor_scale)
+                raw_peak_max = sensor_metrics.get("max", raw_peak_max)
+            elif raw_metrics is not None:
+                control_metrics = raw_metrics
+                control_scale = float(raw_scale)
+            else:
+                control_metrics = None
+                control_scale = float(raw_scale)
 
-        peak_label = "sensor robust peak" if using_sensor else "raw robust peak"
-        display_scale = control_scale
+            control_peak = float(control_metrics["robust"]) if control_metrics and control_metrics.get("robust", 0.0) > 0.0 else frame_peak
+            if control_peak <= 0.0:
+                control_peak = frame_peak
+                control_scale = frame_scale
 
-        if delta <= tolerance:
-            message = "Exposure already within target range."
-        elif changed:
-            message = (
-                f"Exposure adjusted from {current_exp}us to {applied}us "
-                f"({peak_label} {raw_peak_robust:.1f}/{display_scale:.0f})."
+            control_scale = max(control_scale, 1e-6)
+            control_fraction = control_peak / control_scale
+            if control_fraction <= 0.0:
+                control_fraction = frame_fraction
+                control_peak = frame_peak
+                control_scale = frame_scale
+
+            sensor_peak = sensor_metrics.get("max") if using_sensor and sensor_metrics else 0.0
+            sensor_peak_robust = sensor_metrics.get("robust") if using_sensor and sensor_metrics else 0.0
+            sensor_fraction = (
+                (sensor_peak_robust or 0.0) / max(float(sensor_scale or 1.0), 1e-6)
+                if using_sensor and sensor_metrics
+                else None
             )
-        else:
-            limit = "minimum" if hit_lower else "maximum"
-            message = (
-                f"Exposure change limited by camera {limit} ({peak_label} {raw_peak_robust:.1f}/{display_scale:.0f})."
+            raw_peak_robust = control_peak
+            raw_fraction = control_fraction
+            if not using_sensor and raw_metrics is not None:
+                sensor_peak = 0.0
+                raw_peak_max = raw_metrics.get("max", raw_peak_max)
+            elif not using_sensor:
+                sensor_peak = 0.0
+                raw_peak_max = raw_peak_max
+            raw_cluster_size = (
+                int(sensor_metrics.get("cluster_size", 0)) if using_sensor and sensor_metrics else int(raw_metrics.get("cluster_size", 0) if raw_metrics else 0)
             )
-        if raw_dropped > 0:
-            suffix = "s" if raw_dropped != 1 else ""
-            message += f" Ignored {raw_dropped} hot pixel{suffix}."
-        if gain_triggered:
-            message += " Gain auto was triggered."
-        elif gain_auto_available and delta > tolerance and (hit_lower or hit_upper):
-            message += " Gain auto unavailable or failed."
+            raw_dropped = (
+                int(sensor_metrics.get("dropped", 0)) if using_sensor and sensor_metrics else int(raw_metrics.get("dropped", 0) if raw_metrics else 0)
+            )
 
-        return {
-            "value": int(applied),
-            "previous_value": int(current_exp),
-            "target_fraction": float(target_fraction),
-            "frame_peak": float(frame_peak),
-            "frame_peak_fraction": float(frame_fraction),
-            "frame_peak_raw": float(raw_peak_max),
-            "frame_peak_raw_robust": float(raw_peak_robust),
-            "frame_peak_raw_cluster_size": int(raw_cluster_size),
-            "frame_peak_raw_hot_pixels_ignored": int(raw_dropped),
-            "frame_peak_raw_fraction": float(raw_fraction),
-            "sensor_peak": float(sensor_peak) if using_sensor else None,
-            "sensor_peak_robust": float(sensor_peak_robust) if using_sensor else None,
-            "sensor_peak_cluster_size": int(sensor_metrics.get("cluster_size", 0)) if using_sensor and sensor_metrics else None,
-            "sensor_hot_pixels_ignored": int(sensor_metrics.get("dropped", 0)) if using_sensor and sensor_metrics else None,
-            "sensor_peak_fraction": float(sensor_fraction) if sensor_fraction is not None else None,
-            "sensor_max_value": float(sensor_scale) if sensor_scale is not None else None,
-            "expected_fraction": float(expected_fraction),
-            "changed": bool(changed),
-            "gain_auto_available": bool(gain_auto_available),
-            "gain_auto_triggered": bool(gain_triggered),
-            "message": message,
-            "min_exposure": float(min_exp),
-            "max_exposure": float(max_exp),
-        }
+            current_exp = max(1, self.get_exposure_us())
+            min_exp = 10.0
+            max_exp = 1_000_000.0
+            inc = None
+            try:
+                feat = self._get_exposure_feature()
+                try:
+                    min_exp, max_exp = feat.get_range()
+                except (VmbFeatureError, TypeError, ValueError):
+                    min_exp, max_exp = 10.0, 1_000_000.0
+                try:
+                    inc = feat.get_increment()
+                except (VmbFeatureError, AttributeError):
+                    inc = None
+            except Exception:
+                feat = None
+
+            min_exp = float(min_exp)
+            max_exp = float(max_exp)
+
+            factor = target_fraction / max(raw_fraction, 1e-6)
+            unclamped_exp = float(current_exp) * factor
+            desired_exp = unclamped_exp
+            desired_exp = max(min_exp, min(max_exp, desired_exp))
+            if inc:
+                desired_exp = _nearest_with_increment(desired_exp, min_exp, max_exp, inc)
+            desired_int = int(round(desired_exp))
+
+            applied = self.set_exposure_us(desired_int)
+            changed = applied != current_exp
+            tol = inc if inc else 1.0
+            reduction_requested = factor < 0.999
+            increase_requested = factor > 1.001
+            clamped_lower = unclamped_exp <= min_exp + tol
+            clamped_upper = unclamped_exp >= max_exp - tol
+            hit_lower = clamped_lower or (
+                reduction_requested and (float(applied) <= min_exp + tol or not changed)
+            )
+            hit_upper = clamped_upper or (
+                increase_requested and (float(applied) >= max_exp - tol or not changed)
+            )
+
+            expected_fraction = raw_fraction * (float(applied) / max(1.0, float(current_exp)))
+            expected_fraction = min(1.0, expected_fraction)
+            delta = abs(expected_fraction - target_fraction)
+
+            gain_auto_feat = self._get_gain_auto_feature()
+            gain_auto_available = gain_auto_feat is not None
+            gain_triggered = False
+
+            if delta > tolerance and gain_auto_available and (hit_lower or hit_upper):
+                gain_triggered = self._trigger_gain_auto_once()
+
+            peak_label = "sensor robust peak" if using_sensor else "raw robust peak"
+            display_scale = control_scale
+
+            if delta <= tolerance:
+                message = "Exposure already within target range."
+            elif changed:
+                message = (
+                    f"Exposure adjusted from {current_exp}us to {applied}us "
+                    f"({peak_label} {raw_peak_robust:.1f}/{display_scale:.0f})."
+                )
+            else:
+                limit = "minimum" if hit_lower else "maximum"
+                message = (
+                    f"Exposure change limited by camera {limit} ({peak_label} {raw_peak_robust:.1f}/{display_scale:.0f})."
+                )
+            if raw_dropped > 0:
+                suffix = "s" if raw_dropped != 1 else ""
+                message += f" Ignored {raw_dropped} hot pixel{suffix}."
+            if gain_triggered:
+                message += " Gain auto was triggered."
+            elif gain_auto_available and delta > tolerance and (hit_lower or hit_upper):
+                message += " Gain auto unavailable or failed."
+
+            result = {
+                "value": int(applied),
+                "previous_value": int(current_exp),
+                "target_fraction": float(target_fraction),
+                "frame_peak": float(frame_peak),
+                "frame_peak_fraction": float(frame_fraction),
+                "frame_peak_raw": float(raw_peak_max),
+                "frame_peak_raw_robust": float(raw_peak_robust),
+                "frame_peak_raw_cluster_size": int(raw_cluster_size),
+                "frame_peak_raw_hot_pixels_ignored": int(raw_dropped),
+                "frame_peak_raw_fraction": float(raw_fraction),
+                "sensor_peak": float(sensor_peak) if using_sensor else None,
+                "sensor_peak_robust": float(sensor_peak_robust) if using_sensor else None,
+                "sensor_peak_cluster_size": int(sensor_metrics.get("cluster_size", 0)) if using_sensor and sensor_metrics else None,
+                "sensor_hot_pixels_ignored": int(sensor_metrics.get("dropped", 0)) if using_sensor and sensor_metrics else None,
+                "sensor_peak_fraction": float(sensor_fraction) if sensor_fraction is not None else None,
+                "sensor_max_value": float(sensor_scale) if sensor_scale is not None else None,
+                "expected_fraction": float(expected_fraction),
+                "changed": bool(changed),
+                "gain_auto_available": bool(gain_auto_available),
+                "gain_auto_triggered": bool(gain_triggered),
+                "message": message,
+                "min_exposure": float(min_exp),
+                "max_exposure": float(max_exp),
+            }
+            return result
+        finally:
+            self._maybe_disable_sensor_capture(force=True)
 
     # ---------- Colormap ----------
 
@@ -1001,8 +1060,9 @@ class CameraService:
         if not self._cam:
             raise RuntimeError("Camera not running")
 
-        frames: List[np.ndarray] = []
-        while len(frames) < num_frames:
+        acc_frame: Optional[np.ndarray] = None
+        captured = 0
+        while captured < num_frames:
             if not self._running:
                 raise RuntimeError("Camera not running")
             got_signal = self.wait_for_frame_signal(timeout=0.2)
@@ -1011,19 +1071,23 @@ class CameraService:
             latest_gray = self.get_latest_gray(raw=True)
             if latest_gray is None:
                 continue
-            frames.append(latest_gray)
+            frame_f32 = latest_gray.astype(np.float32, copy=False)
+            if acc_frame is None:
+                acc_frame = frame_f32.copy()
+            else:
+                acc_frame += frame_f32
+            captured += 1
 
-        if not frames:
+        if acc_frame is None or captured == 0:
             raise RuntimeError("Could not capture any background frames.")
 
-        # Average the collected frames. Convert to float for calculation.
-        avg_frame_float = np.mean([f.astype(np.float32) for f in frames], axis=0)
+        avg_frame_float = acc_frame / float(captured)
 
         with self._frame_lock:
             self._background_frame = avg_frame_float
             self._background_subtraction_enabled = True
 
-        self._logger.info(f"Background subtraction enabled, averaged {len(frames)} frames.")
+        self._logger.info(f"Background subtraction enabled, averaged {captured} frames.")
 
     def stop_background_subtraction(self):
         with self._frame_lock:
