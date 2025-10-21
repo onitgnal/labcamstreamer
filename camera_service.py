@@ -396,6 +396,104 @@ class CameraService:
             self._sensor_max_dtype = dtype
         return measured
 
+    def _signal_peak_metrics(
+        self,
+        arr: Optional[np.ndarray],
+        *,
+        inspect_count: int = 4096,
+        hot_gap_ratio: float = 6.0,
+        hot_cluster_min: int = 6,
+        max_cluster: int = 256,
+    ) -> Dict[str, float]:
+        """
+        Analyse the brightest pixels in ``arr`` and return robust peak statistics.
+
+        The routine inspects the brightest ``inspect_count`` samples (default 4096),
+        looks for the first large gap in the descending sorted values, and treats
+        tiny clusters above that gap as hot pixels to be ignored before computing
+        a robust peak estimate.  The resulting dictionary includes:
+
+            - ``max``: absolute max value seen in the inspected samples.
+            - ``robust``: representative peak after excluding hot outliers.
+            - ``cluster_size``: number of pixels supporting the robust peak.
+            - ``dropped``: number of suspected hot-pixel samples ignored.
+            - ``hot_gap``: ratio between the cluster boundary and the next value.
+            - ``inspect_count``: number of samples included in the inspection.
+        """
+        stats: Dict[str, float] = {
+            "max": 0.0,
+            "robust": 0.0,
+            "cluster_size": 0,
+            "dropped": 0,
+            "hot_gap": float("inf"),
+            "inspect_count": 0,
+        }
+
+        if arr is None:
+            return stats
+        arr_np = np.asarray(arr)
+        if arr_np.size == 0:
+            return stats
+
+        flat = np.ravel(arr_np).astype(np.float64, copy=False)
+        flat = flat[np.isfinite(flat)]
+        count = flat.size
+        if count == 0:
+            return stats
+
+        stats["inspect_count"] = int(min(count, inspect_count))
+        stats["max"] = float(np.max(flat))
+
+        inspect = stats["inspect_count"]
+        if inspect <= 0:
+            stats["robust"] = stats["max"]
+            stats["cluster_size"] = 1 if stats["max"] > 0 else 0
+            return stats
+
+        top = np.partition(flat, count - inspect)[count - inspect:]
+        top.sort()
+        working = top[::-1]  # descending view
+
+        dropped = 0
+        while working.size > 0:
+            if working.size == 1:
+                cluster_size = 1
+                gap_ratio = float("inf")
+            else:
+                denom = np.maximum(working[1:], 1e-6)
+                ratios = working[:-1] / denom
+                gap_index = int(np.argmax(ratios))
+                gap_ratio = float(ratios[gap_index])
+                if gap_ratio >= hot_gap_ratio:
+                    cluster_size = gap_index + 1
+                else:
+                    cluster_size = min(working.size, max_cluster)
+
+            cluster_values = working[:cluster_size]
+
+            if cluster_values.size >= hot_cluster_min or working.size <= hot_cluster_min:
+                if cluster_values.size >= 4:
+                    robust_value = float(cluster_values[min(3, cluster_values.size - 1)])
+                elif cluster_values.size > 1:
+                    robust_value = float(np.mean(cluster_values))
+                else:
+                    robust_value = float(cluster_values[0])
+                stats["robust"] = robust_value
+                stats["cluster_size"] = int(cluster_values.size)
+                stats["dropped"] = int(dropped)
+                stats["hot_gap"] = gap_ratio if working.size > 1 else float("inf")
+                return stats
+
+            dropped += cluster_values.size
+            working = working[cluster_size:]
+
+        # Fallback: no cluster satisfied criteria; fall back to the absolute max.
+        stats["robust"] = float(stats["max"])
+        stats["cluster_size"] = int(max(1, min(max_cluster, inspect - dropped if inspect > dropped else inspect)))
+        stats["dropped"] = int(dropped)
+        stats["hot_gap"] = float("inf")
+        return stats
+
     # ---------- Lifecycle ----------
 
     def list_available_cameras(self) -> List[Dict[str, str]]:
@@ -694,19 +792,32 @@ class CameraService:
         if np.issubdtype(frame_arr.dtype, np.integer):
             frame_scale = float(np.iinfo(frame_arr.dtype).max)
         else:
-                frame_scale = float(np.max(np.abs(frame_arr.astype(np.float32))))
-                if not np.isfinite(frame_scale) or frame_scale <= 0.0:
-                    frame_scale = frame_peak
+            frame_scale = float(np.max(np.abs(frame_arr.astype(np.float32))))
+            if not np.isfinite(frame_scale) or frame_scale <= 0.0:
+                frame_scale = frame_peak
         frame_fraction = frame_peak / max(frame_scale, 1e-6)
+        raw_arr = None
+        raw_metrics = None
+        raw_scale = frame_scale
+        raw_peak_max = frame_peak
+        if raw_frame is not None and getattr(raw_frame, "size", 0) > 0:
+            raw_arr = np.asarray(raw_frame)
+            if np.issubdtype(raw_arr.dtype, np.integer):
+                raw_scale = float(np.iinfo(raw_arr.dtype).max)
+            else:
+                raw_scale = float(np.max(np.abs(raw_arr.astype(np.float32))))
+                if not np.isfinite(raw_scale) or raw_scale <= 0.0:
+                    raw_scale = float(np.max(np.abs(raw_arr)))
+                if not np.isfinite(raw_scale) or raw_scale <= 0.0:
+                    raw_scale = frame_scale
+            raw_metrics = self._signal_peak_metrics(raw_arr)
+            raw_peak_max = max(raw_peak_max, raw_metrics.get("max", frame_peak))
 
         sensor_arr = None
-        sensor_peak = 0.0
         sensor_scale = None
+        sensor_metrics: Optional[Dict[str, float]] = None
         if sensor_frame is not None and getattr(sensor_frame, "size", 0) > 0:
             sensor_arr = np.asarray(sensor_frame)
-            sensor_peak = float(np.max(sensor_arr))
-            if not np.isfinite(sensor_peak) or sensor_peak < 0.0:
-                sensor_peak = 0.0
             try:
                 sensor_scale = self._ensure_sensor_max_value(sensor_arr)
             except Exception as exc:
@@ -714,24 +825,55 @@ class CameraService:
                 sensor_scale = None
             if sensor_scale is not None and (not np.isfinite(sensor_scale) or sensor_scale <= 0.0):
                 sensor_scale = None
+            if sensor_scale is not None:
+                sensor_metrics = self._signal_peak_metrics(sensor_arr)
 
-        using_sensor = sensor_scale is not None and sensor_scale > 0.0
-        raw_peak = sensor_peak if using_sensor else frame_peak
-        raw_scale = sensor_scale if using_sensor else frame_scale
-        if not using_sensor and raw_frame is not None and getattr(raw_frame, "size", 0) > 0:
-            raw_arr = np.asarray(raw_frame)
-            raw_peak = float(np.max(raw_arr))
-            if np.issubdtype(raw_arr.dtype, np.integer):
-                raw_scale = float(np.iinfo(raw_arr.dtype).max)
-            else:
-                raw_scale = float(np.max(np.abs(raw_arr.astype(np.float32))))
-                if not np.isfinite(raw_scale) or raw_scale <= 0.0:
-                    raw_scale = raw_peak
+        using_sensor = sensor_scale is not None and sensor_scale > 0.0 and sensor_metrics is not None
 
-        if not np.isfinite(raw_scale) or raw_scale <= 0.0:
-            raw_scale = max(raw_peak, frame_scale, 1.0)
-        raw_fraction = raw_peak / max(raw_scale, 1e-6)
-        sensor_fraction = raw_fraction if using_sensor else None
+        if using_sensor:
+            control_metrics = sensor_metrics
+            control_scale = float(sensor_scale)
+            raw_peak_max = sensor_metrics.get("max", raw_peak_max)
+        elif raw_metrics is not None:
+            control_metrics = raw_metrics
+            control_scale = float(raw_scale)
+        else:
+            control_metrics = None
+            control_scale = float(raw_scale)
+
+        control_peak = float(control_metrics["robust"]) if control_metrics and control_metrics.get("robust", 0.0) > 0.0 else frame_peak
+        if control_peak <= 0.0:
+            control_peak = frame_peak
+            control_scale = frame_scale
+
+        control_scale = max(control_scale, 1e-6)
+        control_fraction = control_peak / control_scale
+        if control_fraction <= 0.0:
+            control_fraction = frame_fraction
+            control_peak = frame_peak
+            control_scale = frame_scale
+
+        sensor_peak = sensor_metrics.get("max") if using_sensor and sensor_metrics else 0.0
+        sensor_peak_robust = sensor_metrics.get("robust") if using_sensor and sensor_metrics else 0.0
+        sensor_fraction = (
+            (sensor_peak_robust or 0.0) / max(float(sensor_scale or 1.0), 1e-6)
+            if using_sensor and sensor_metrics
+            else None
+        )
+        raw_peak_robust = control_peak
+        raw_fraction = control_fraction
+        if not using_sensor and raw_metrics is not None:
+            sensor_peak = 0.0
+            raw_peak_max = raw_metrics.get("max", raw_peak_max)
+        elif not using_sensor:
+            sensor_peak = 0.0
+            raw_peak_max = raw_peak_max
+        raw_cluster_size = (
+            int(sensor_metrics.get("cluster_size", 0)) if using_sensor and sensor_metrics else int(raw_metrics.get("cluster_size", 0) if raw_metrics else 0)
+        )
+        raw_dropped = (
+            int(sensor_metrics.get("dropped", 0)) if using_sensor and sensor_metrics else int(raw_metrics.get("dropped", 0) if raw_metrics else 0)
+        )
 
         current_exp = max(1, self.get_exposure_us())
         min_exp = 10.0
@@ -786,20 +928,24 @@ class CameraService:
         if delta > tolerance and gain_auto_available and (hit_lower or hit_upper):
             gain_triggered = self._trigger_gain_auto_once()
 
-        peak_label = "sensor peak" if using_sensor else "raw peak"
+        peak_label = "sensor robust peak" if using_sensor else "raw robust peak"
+        display_scale = control_scale
 
         if delta <= tolerance:
             message = "Exposure already within target range."
         elif changed:
             message = (
                 f"Exposure adjusted from {current_exp}us to {applied}us "
-                f"({peak_label} {raw_peak:.1f}/{raw_scale:.0f})."
+                f"({peak_label} {raw_peak_robust:.1f}/{display_scale:.0f})."
             )
         else:
             limit = "minimum" if hit_lower else "maximum"
             message = (
-                f"Exposure change limited by camera {limit} ({peak_label} {raw_peak:.1f}/{raw_scale:.0f})."
+                f"Exposure change limited by camera {limit} ({peak_label} {raw_peak_robust:.1f}/{display_scale:.0f})."
             )
+        if raw_dropped > 0:
+            suffix = "s" if raw_dropped != 1 else ""
+            message += f" Ignored {raw_dropped} hot pixel{suffix}."
         if gain_triggered:
             message += " Gain auto was triggered."
         elif gain_auto_available and delta > tolerance and (hit_lower or hit_upper):
@@ -811,9 +957,15 @@ class CameraService:
             "target_fraction": float(target_fraction),
             "frame_peak": float(frame_peak),
             "frame_peak_fraction": float(frame_fraction),
-            "frame_peak_raw": float(raw_peak),
+            "frame_peak_raw": float(raw_peak_max),
+            "frame_peak_raw_robust": float(raw_peak_robust),
+            "frame_peak_raw_cluster_size": int(raw_cluster_size),
+            "frame_peak_raw_hot_pixels_ignored": int(raw_dropped),
             "frame_peak_raw_fraction": float(raw_fraction),
             "sensor_peak": float(sensor_peak) if using_sensor else None,
+            "sensor_peak_robust": float(sensor_peak_robust) if using_sensor else None,
+            "sensor_peak_cluster_size": int(sensor_metrics.get("cluster_size", 0)) if using_sensor and sensor_metrics else None,
+            "sensor_hot_pixels_ignored": int(sensor_metrics.get("dropped", 0)) if using_sensor and sensor_metrics else None,
             "sensor_peak_fraction": float(sensor_fraction) if sensor_fraction is not None else None,
             "sensor_max_value": float(sensor_scale) if sensor_scale is not None else None,
             "expected_fraction": float(expected_fraction),
