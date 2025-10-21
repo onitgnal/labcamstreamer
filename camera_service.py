@@ -531,6 +531,10 @@ class CameraService:
         if np.isfinite(hot_threshold):
             while drop_count < candidates.size and candidates[drop_count] > hot_threshold:
                 drop_count += 1
+        if drop_count > 0:
+            max_hot_drop = max(2, hot_cluster_min - 1)
+            if drop_count > max_hot_drop:
+                drop_count = max_hot_drop
 
         trimmed = candidates[drop_count:]
         if drop_count > 0:
