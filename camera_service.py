@@ -456,8 +456,8 @@ class CameraService:
         arr: Optional[np.ndarray],
         *,
         inspect_count: int = 4096,
-        hot_gap_ratio: float = 5.0,
-        hot_cluster_min: int = 6,
+        hot_gap_ratio: float = 8.0,
+        hot_cluster_min: int = 4,
         max_cluster: int = 256,
     ) -> Dict[str, float]:
         """
