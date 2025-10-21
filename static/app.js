@@ -11,6 +11,7 @@
   const cameraSelect = qs('#cameraSelect');
   const saveAllBtn = qs('#saveAllBtn');
   const backgroundSubtractionToggle = qs('#backgroundSubtractionToggle');
+  const captureBackgroundBtn = qs('#captureBackgroundBtn');
   const backgroundSubtractionModal = qs('#backgroundSubtractionModal');
   const closeModalButton = backgroundSubtractionModal.querySelector('.close-button');
   const startBgSubtractionBtn = qs('#startBgSubtraction');
@@ -20,6 +21,8 @@
   const expSlider = qs('#expSlider');
   const expLabel = qs('#expLabel');
   const cmSelect = qs('#colormapSelect');
+
+  if (captureBackgroundBtn) captureBackgroundBtn.disabled = !cameraToggle.checked;
 
   // Beam analysis controls
   const baPixelSize = qs('#baPixelSize');
@@ -121,6 +124,8 @@
   let autoExposureEnabled = false;
   let autoExposureLoopTimer = null;
   let autoExposureBusy = false;
+  let backgroundEnabled = false;
+  let hasBackgroundFrame = false;
   // ----- REST helpers -----
   async function logToServer(level, message, data) {
     try {
@@ -217,6 +222,43 @@
     if (duration > 0) {
       hideTimer = setTimeout(removeToast, duration);
     }
+  }
+
+  async function refreshBackgroundStatus() {
+    if (!backgroundSubtractionToggle) return;
+    try {
+      const status = await getJSON('/background/status');
+      backgroundEnabled = !!(status && status.enabled);
+      hasBackgroundFrame = !!(status && status.has_background);
+      backgroundSubtractionToggle.checked = backgroundEnabled;
+      backgroundSubtractionToggle.disabled = !hasBackgroundFrame;
+      backgroundSubtractionToggle.title = hasBackgroundFrame
+        ? 'Enable or disable subtraction of the captured background.'
+        : 'Capture a background before enabling subtraction.';
+    } catch (err) {
+      backgroundEnabled = false;
+      hasBackgroundFrame = false;
+      backgroundSubtractionToggle.checked = false;
+      backgroundSubtractionToggle.disabled = true;
+      backgroundSubtractionToggle.title = 'Background status unavailable.';
+    }
+  }
+
+  function extractErrorMessage(err) {
+    if (!err) return 'Unknown error';
+    if (typeof err === 'string') {
+      try {
+        const parsed = JSON.parse(err);
+        if (parsed && typeof parsed.error === 'string') {
+          return parsed.error;
+        }
+      } catch (_) { /* ignore */ }
+      return err;
+    }
+    if (err && typeof err.message === 'string') {
+      return extractErrorMessage(err.message);
+    }
+    return 'Unknown error';
   }
 
   function setCausticImportBusy(busy) {
@@ -2190,12 +2232,14 @@
     const cameraId = cameraSelect.value;
     cameraSelect.disabled = enabled; // Disable selector when camera is on
     setAutoExposureDisabled(!enabled);
+    if (captureBackgroundBtn) captureBackgroundBtn.disabled = !enabled;
     try {
       const res = await postJSON('/camera', { enabled, camera_id: cameraId });
       const success = !!res.enabled;
       cameraToggle.checked = success;
       cameraSelect.disabled = success;
       setAutoExposureDisabled(!success);
+      if (captureBackgroundBtn) captureBackgroundBtn.disabled = !success;
       stream.src = success ? '/video_feed?ts=' + Date.now() : '';
       if (!success && res.error) {
         logToServer('error', 'Failed to toggle camera', { error: res.error });
@@ -2206,7 +2250,9 @@
       cameraToggle.checked = !enabled;
       cameraSelect.disabled = !enabled;
       setAutoExposureDisabled(!cameraToggle.checked);
+      if (captureBackgroundBtn) captureBackgroundBtn.disabled = !cameraToggle.checked;
     }
+    await refreshBackgroundStatus();
   });
 
   if (saveAllBtn) {
@@ -2348,48 +2394,97 @@
   window.addEventListener('resize', resizeCanvasToImage);
 
   // ----- Background Subtraction Logic -----
-  backgroundSubtractionToggle.addEventListener('change', async () => {
-    if (backgroundSubtractionToggle.checked) {
-      backgroundSubtractionModal.hidden = false;
-    } else {
-      try {
-        await postJSON('/background_subtraction', { enabled: false });
-        logToServer('info', 'Background subtraction disabled');
-      } catch (e) {
-        logToServer('error', 'Failed to disable background subtraction', { error: e.toString() });
+  if (captureBackgroundBtn && backgroundSubtractionModal) {
+    captureBackgroundBtn.addEventListener('click', () => {
+      if (captureBackgroundBtn.disabled) {
+        alert('Start the camera before capturing a background.');
+        return;
       }
-    }
-  });
-
-  closeModalButton.addEventListener('click', () => {
-    backgroundSubtractionModal.hidden = true;
-    backgroundSubtractionToggle.checked = false;
-  });
-
-  startBgSubtractionBtn.addEventListener('click', async () => {
-    const numFrames = parseInt(numFramesInput.value, 10);
-    if (isNaN(numFrames) || numFrames <= 0) {
-      alert('Please enter a valid number of frames.');
-      return;
-    }
-    backgroundSubtractionModal.hidden = true;
-    try {
-      await postJSON('/background_subtraction', { enabled: true, num_frames: numFrames });
-      logToServer('info', 'Background subtraction enabled', { num_frames: numFrames });
-    } catch (e) {
-      logToServer('error', 'Failed to enable background subtraction', { error: e.toString() });
-      let message = e && e.message ? e.message : 'Unknown error';
-      try {
-        const parsed = JSON.parse(message);
-        if (parsed && typeof parsed.error === 'string') {
-          message = parsed.error;
-        }
-      } catch (_) {}
-      alert(`Background subtraction failed: ${message}`);
       backgroundSubtractionModal.hidden = false;
-      backgroundSubtractionToggle.checked = false;
-    }
-  });
+      if (numFramesInput) {
+        requestAnimationFrame(() => numFramesInput.focus());
+      }
+    });
+  }
+
+  if (backgroundSubtractionToggle) {
+    backgroundSubtractionToggle.addEventListener('change', async () => {
+      if (backgroundSubtractionToggle.disabled) {
+        backgroundSubtractionToggle.checked = backgroundEnabled;
+        return;
+      }
+      const desired = backgroundSubtractionToggle.checked;
+      if (desired && !hasBackgroundFrame) {
+        showToast('Capture a background before enabling subtraction.', { variant: 'warning', duration: 5000 });
+        backgroundSubtractionToggle.checked = false;
+        return;
+      }
+      try {
+        const res = await postJSON('/background_subtraction', { enabled: desired, clear: false });
+        backgroundEnabled = !!res?.enabled;
+        hasBackgroundFrame = !!res?.has_background;
+        backgroundSubtractionToggle.checked = backgroundEnabled;
+        backgroundSubtractionToggle.disabled = !hasBackgroundFrame;
+        const variant = desired ? 'success' : 'info';
+        logToServer('info', 'Background subtraction toggled', { enabled: backgroundEnabled });
+        showToast(
+          desired ? 'Background subtraction enabled.' : 'Background subtraction disabled.',
+          { variant, duration: 4000 }
+        );
+      } catch (err) {
+        const message = extractErrorMessage(err);
+        showToast(`Background update failed: ${message}`, { variant: 'error', duration: 6000 });
+        logToServer('error', 'Background toggle failed', { enabled: desired, error: message });
+        backgroundSubtractionToggle.checked = !desired;
+      } finally {
+        await refreshBackgroundStatus();
+      }
+    });
+  }
+
+  if (closeModalButton && backgroundSubtractionModal) {
+    closeModalButton.addEventListener('click', () => {
+      backgroundSubtractionModal.hidden = true;
+    });
+  }
+
+  if (startBgSubtractionBtn && backgroundSubtractionModal) {
+    startBgSubtractionBtn.addEventListener('click', async () => {
+      const numFrames = parseInt(numFramesInput.value, 10);
+      if (isNaN(numFrames) || numFrames <= 0) {
+        alert('Please enter a valid number of frames.');
+        return;
+      }
+      backgroundSubtractionModal.hidden = true;
+      if (captureBackgroundBtn) captureBackgroundBtn.disabled = true;
+      try {
+        const res = await postJSON('/background/capture', { num_frames: numFrames });
+        logToServer('info', 'Background captured', { num_frames: numFrames });
+        hasBackgroundFrame = true;
+        if (backgroundSubtractionToggle) {
+          backgroundSubtractionToggle.disabled = false;
+        }
+        if (res && res.download_url) {
+          const url = `${res.download_url}?t=${Date.now()}`;
+          const downloadName = res.filename || 'background.png';
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = downloadName;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        }
+        showToast(`Background saved (${numFrames} frame${numFrames === 1 ? '' : 's'} averaged).`, { variant: 'success', duration: 5000 });
+      } catch (err) {
+        const message = extractErrorMessage(err);
+        showToast(`Background capture failed: ${message}`, { variant: 'error', duration: 6000 });
+        logToServer('error', 'Background capture failed', { num_frames: numFrames, error: message });
+      } finally {
+        if (captureBackgroundBtn) captureBackgroundBtn.disabled = !cameraToggle.checked;
+        await refreshBackgroundStatus();
+      }
+    });
+  }
 
   // ----- Bootstrap -----
   (async function init() {
@@ -2398,8 +2493,10 @@
       syncCameraList(),
       refreshRois(),
       syncBeamOptions(),
-      refreshCausticState()
+      refreshCausticState(),
+      refreshBackgroundStatus()
     ]);
+    if (captureBackgroundBtn) captureBackgroundBtn.disabled = !cameraToggle.checked;
     pollMetrics();
     if (stream.complete) {
       state.naturalW = stream.naturalWidth || state.naturalW;
@@ -2408,7 +2505,3 @@
     }
   })();
 })();
-
-
-
-

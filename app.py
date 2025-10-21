@@ -22,7 +22,7 @@ from concurrent.futures.process import BrokenProcessPool
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, render_template, request, send_file, url_for
 from beam_analysis import analyze_beam
 
 from camera_service import CameraService, apply_colormap_to_gray, apply_colormap_to_bgr
@@ -81,6 +81,9 @@ CAUSTIC_CACHE_DIR.mkdir(exist_ok=True)
 
 EXPORTS_DIR = Path("exports")
 EXPORTS_DIR.mkdir(exist_ok=True)
+
+BACKGROUND_EXPORTS_DIR = EXPORTS_DIR / "backgrounds"
+BACKGROUND_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 CAUSTIC_AUTOSAVE_DIR = EXPORTS_DIR / "caustic_autosave"
 CAUSTIC_AUTOSAVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1619,23 +1622,72 @@ def beam_options():
         return jsonify(dict(_beam_opts))
 
 # Background Subtraction
+@app.route("/background/status")
+def background_status():
+    return jsonify(
+        {
+            "enabled": cam_service.is_background_subtraction_enabled(),
+            "has_background": cam_service.has_background_frame(),
+        }
+    )
+
+
+@app.route("/background/capture", methods=["POST"])
+def background_capture():
+    data = request.get_json(silent=True) or {}
+    num_frames = int(data.get("num_frames", 10))
+    try:
+        preview_u8 = cam_service.capture_background(num_frames)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    filename = f"global_background_{ts}.png"
+    out_path = BACKGROUND_EXPORTS_DIR / filename
+    ok, encoded = cv2.imencode(".png", preview_u8)
+    if not ok:
+        return jsonify({"error": "Failed to encode background image."}), 500
+    out_path.write_bytes(encoded.tobytes())
+    return jsonify(
+        {
+            "ok": True,
+            "frames": int(num_frames),
+            "filename": filename,
+            "download_url": url_for("download_background", filename=filename),
+        }
+    )
+
+
+@app.route("/background/download/<path:filename>")
+def download_background(filename: str):
+    safe_name = secure_filename(Path(filename).name)
+    target = BACKGROUND_EXPORTS_DIR / safe_name
+    if not target.exists():
+        return jsonify({"error": "Background file not found."}), 404
+    return send_file(target, mimetype="image/png", as_attachment=True, download_name=target.name)
+
+
 @app.route("/background_subtraction", methods=["POST"])
 def background_subtraction():
     data = request.get_json(silent=True) or {}
     enabled = bool(data.get("enabled", False))
-    if enabled:
-        num_frames = int(data.get("num_frames", 10))
-        try:
-            cam_service.start_background_subtraction(num_frames)
-            return jsonify({"ok": True})
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
-    else:
-        try:
-            cam_service.stop_background_subtraction()
-            return jsonify({"ok": True})
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+    clear = bool(data.get("clear", False))
+    try:
+        if enabled:
+            if "num_frames" in data:
+                cam_service.capture_background(int(data.get("num_frames", 10)))
+            cam_service.enable_background_subtraction()
+        else:
+            cam_service.disable_background_subtraction(clear=clear)
+        return jsonify(
+            {
+                "ok": True,
+                "enabled": cam_service.is_background_subtraction_enabled(),
+                "has_background": cam_service.has_background_frame(),
+            }
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 409
 
 # Camera On/Off
 @app.route("/camera", methods=["POST"])

@@ -28,6 +28,7 @@
             <span>Background Subtraction</span>
             <input id="backgroundSubtractionToggle" type="checkbox" />
           </label>
+          <button id="captureBackgroundBtn" class="secondary" type="button" title="Capture and save an averaged background image.">Capture background</button>
           <button id="autoExposureBtn" class="secondary" type="button" aria-pressed="false" title="Enable auto exposure to keep the peak near 90%.">Auto exposure: Off</button>
         </div>
       </section>
@@ -280,12 +281,10 @@
       <p>Please block the beam to capture the background. The application will capture a number of frames and average them to create a background image that will be subtracted from all subsequent frames.</p>
       <label for="numFrames">Number of frames to average:</label>
       <input type="number" id="numFrames" name="numFrames" value="10" min="1">
-      <button id="startBgSubtraction" class="primary">Start</button>
+      <button id="startBgSubtraction" class="primary">Capture</button>
     </div>
   </div>
   <div id="toastContainer" class="toast-container"></div>
 </body>
 </html>
-
-
 

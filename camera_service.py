@@ -1056,9 +1056,9 @@ class CameraService:
             self._colormap = mode
             return self._colormap
 
-    def start_background_subtraction(self, num_frames: int):
-        if not self._cam:
-            raise RuntimeError("Camera not running")
+    def capture_background(self, num_frames: int) -> np.ndarray:
+        if num_frames <= 0:
+            raise ValueError("num_frames must be positive")
 
         acc_frame: Optional[np.ndarray] = None
         captured = 0
@@ -1080,9 +1080,7 @@ class CameraService:
                     elif sensor_arr.ndim == 3 and sensor_arr.shape[-1] >= 3:
                         sensor_arr = sensor_arr.max(axis=2)
                     sensor_arr = np.asarray(sensor_arr)
-                    if sensor_arr.size == 0:
-                        frame_f32 = None
-                    else:
+                    if sensor_arr.size > 0:
                         if np.issubdtype(sensor_arr.dtype, np.integer):
                             scale = float(np.iinfo(sensor_arr.dtype).max)
                         else:
@@ -1115,15 +1113,35 @@ class CameraService:
 
         with self._frame_lock:
             self._background_frame = avg_frame_float
-            self._background_subtraction_enabled = True
 
-        self._logger.info(f"Background subtraction enabled, averaged {captured} frames.")
+        self._logger.info(f"Background frame captured from {captured} frames.")
+        return np.clip(avg_frame_float, 0.0, 255.0).astype(np.uint8)
 
-    def stop_background_subtraction(self):
+    def start_background_subtraction(self, num_frames: int) -> np.ndarray:
+        preview = self.capture_background(num_frames)
+        self.enable_background_subtraction()
+        return preview
+
+    def enable_background_subtraction(self) -> None:
         with self._frame_lock:
-            self._background_frame = None
+            if self._background_frame is None:
+                raise RuntimeError("No background frame captured.")
+            self._background_subtraction_enabled = True
+        self._logger.info("Background subtraction enabled.")
+
+    def disable_background_subtraction(self, *, clear: bool = False) -> None:
+        with self._frame_lock:
             self._background_subtraction_enabled = False
-        self._logger.info("Background subtraction disabled.")
+            had_frame = self._background_frame is not None
+            if clear:
+                self._background_frame = None
+        if clear and had_frame:
+            self._logger.info("Background subtraction disabled and frame cleared.")
+        else:
+            self._logger.info("Background subtraction disabled.")
+
+    def stop_background_subtraction(self, *, clear: bool = True):
+        self.disable_background_subtraction(clear=clear)
 
     # ---------- Frames and MJPEG ----------
 
@@ -1155,6 +1173,10 @@ class CameraService:
     def is_background_subtraction_enabled(self) -> bool:
         with self._frame_lock:
             return self._background_subtraction_enabled
+
+    def has_background_frame(self) -> bool:
+        with self._frame_lock:
+            return self._background_frame is not None
 
     def get_frame_size(self) -> Optional[Tuple[int, int]]:
         with self._frame_lock:
