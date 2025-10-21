@@ -1062,21 +1062,51 @@ class CameraService:
 
         acc_frame: Optional[np.ndarray] = None
         captured = 0
-        while captured < num_frames:
-            if not self._running:
-                raise RuntimeError("Camera not running")
-            got_signal = self.wait_for_frame_signal(timeout=0.2)
-            if not got_signal:
-                continue
-            latest_gray = self.get_latest_gray(raw=True)
-            if latest_gray is None:
-                continue
-            frame_f32 = latest_gray.astype(np.float32, copy=False)
-            if acc_frame is None:
-                acc_frame = frame_f32.copy()
-            else:
-                acc_frame += frame_f32
-            captured += 1
+        try:
+            while captured < num_frames:
+                if not self._running:
+                    raise RuntimeError("Camera not running")
+                got_signal = self.wait_for_frame_signal(timeout=0.2)
+                if not got_signal:
+                    continue
+
+                sensor_sample = self._fetch_sensor_frame(timeout=0.25)
+                frame_f32: Optional[np.ndarray] = None
+
+                if sensor_sample is not None and getattr(sensor_sample, "size", 0) > 0:
+                    sensor_arr = np.asarray(sensor_sample)
+                    if sensor_arr.ndim == 3 and sensor_arr.shape[-1] == 1:
+                        sensor_arr = sensor_arr[..., 0]
+                    elif sensor_arr.ndim == 3 and sensor_arr.shape[-1] >= 3:
+                        sensor_arr = sensor_arr.max(axis=2)
+                    sensor_arr = np.asarray(sensor_arr)
+                    if sensor_arr.size == 0:
+                        frame_f32 = None
+                    else:
+                        if np.issubdtype(sensor_arr.dtype, np.integer):
+                            scale = float(np.iinfo(sensor_arr.dtype).max)
+                        else:
+                            scale = float(np.max(np.abs(sensor_arr.astype(np.float32, copy=False))))
+                        if not np.isfinite(scale) or scale <= 0.0:
+                            scale = float(np.max(sensor_arr))
+                        if not np.isfinite(scale) or scale <= 0.0:
+                            scale = 1.0
+                        frame_f32 = (sensor_arr.astype(np.float32, copy=False) / scale) * 255.0
+                        frame_f32 = np.clip(frame_f32, 0.0, 255.0)
+
+                if frame_f32 is None:
+                    latest_gray = self.get_latest_gray(raw=True)
+                    if latest_gray is None or getattr(latest_gray, "size", 0) == 0:
+                        continue
+                    frame_f32 = latest_gray.astype(np.float32, copy=False)
+
+                if acc_frame is None:
+                    acc_frame = frame_f32.copy()
+                else:
+                    acc_frame += frame_f32
+                captured += 1
+        finally:
+            self._maybe_disable_sensor_capture(force=True)
 
         if acc_frame is None or captured == 0:
             raise RuntimeError("Could not capture any background frames.")
