@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, Iterable, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -21,24 +21,75 @@ except ImportError:
 
 class FakeFeature:
     """A mock VmbPy Feature for controlling camera settings."""
-    def __init__(self, name: str, initial_value: float, min_value: float, max_value: float, increment: float = 1.0):
+    def __init__(
+        self,
+        name: str,
+        initial_value: float,
+        min_value: float,
+        max_value: float,
+        increment: float = 1.0,
+        on_change: Optional[Callable[[float], None]] = None,
+    ):
         self._name = name
         self._value = initial_value
         self._min = min_value
         self._max = max_value
         self._inc = increment
+        self._on_change = on_change
 
     def get(self) -> float:
         return self._value
 
     def set(self, value: float) -> None:
-        self._value = max(self._min, min(self._max, value))
+        clamped = max(self._min, min(self._max, value))
+        if self._inc > 0:
+            steps = round((clamped - self._min) / self._inc)
+            clamped = self._min + steps * self._inc
+            clamped = max(self._min, min(self._max, clamped))
+        self._value = clamped
+        if self._on_change:
+            self._on_change(self._value)
 
     def get_range(self) -> Tuple[float, float]:
         return self._min, self._max
 
     def get_increment(self) -> float:
         return self._inc
+
+
+class FakeEnumFeature:
+    """Simple enum-like feature for GainAuto behaviour."""
+    def __init__(
+        self,
+        name: str,
+        values: Iterable[Union[str, int]],
+        initial_value: Union[str, int],
+        on_change: Optional[Callable[[Union[str, int]], None]] = None,
+    ):
+        self._name = name
+        self._values = tuple(values)
+        if initial_value not in self._values:
+            raise ValueError(f"{initial_value} not valid for {name}")
+        self._value = initial_value
+        self._on_change = on_change
+
+    def get(self) -> Union[str, int]:
+        return self._value
+
+    def set(self, value: Union[str, int]) -> None:
+        if value not in self._values:
+            raise ValueError(f"{value} not valid for {self._name}")
+        self._value = value
+        if self._on_change:
+            self._on_change(value)
+
+    def get_values(self) -> Tuple[Union[str, int], ...]:
+        return self._values
+
+    def set_internal(self, value: Union[str, int]) -> None:
+        if value not in self._values:
+            raise ValueError(f"{value} not valid for {self._name}")
+        self._value = value
 
 class FakeFrame(Frame):
     """
@@ -100,37 +151,124 @@ class FakeCamera:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._handler: Optional[Callable] = None
+        self._control_lock = threading.RLock()
 
         # --- Configurable Parameters ---
         self.width = 1280
         self.height = 1024
         self.fps = 20
         self.random_seed = int(time.time())
-        self.amplitude_range = (15000, 30000)
-        self.sigma_range = (25.0, 60.0)
-        self.background_level = 1000
-        self.background_gradient_strength = 500.0
-        self.drift_position_std_dev = 0.5
-        self.max_amplitude_variation = 0.05  # +/-5 % envelope
-
-        # Noise parameters
-        self.background_noise_fraction = 0.5  # relative to short-exposure peak
-        self.read_noise_fraction = 0.2
-
-        # --- Internal State ---
         self._rng = np.random.default_rng(self.random_seed)
-        self._beams = []
-        self._static_gradient: Optional[np.ndarray] = None
+
+        # Beam characteristics (FWHM in pixels for UI friendliness)
+        self._beam_center = (self.width / 2.0, self.height / 2.0)
+        self._beam_fwhm = 80.0  # pixels (full width at half maximum)
+        self._beam_peak = 18000.0  # intensity before exposure/gain scaling
+        self._beam_fluctuation = 0.05  # relative standard deviation per frame
+
+        # Background controls
+        self._background_level = 600.0
+        self._background_gradient_strength = 500.0
+        self._background_inhomogeneity_strength = 350.0
+
+        # Noise controls
+        self._shot_noise_scale = 3.0
+        self._read_noise_std = 12.0
+
+        # Gain / exposure simulation
+        self._exposure_reference = 20000.0  # microseconds for unit gain reference
+        self._gain_db = 0.0
+        self._gain_limits = (0.0, 24.0)
+        self._gain_auto_pending = False
+
+        # Pre-compute static maps for backgrounds
+        self._gradient_map = self._create_gradient_map()
+        self._inhomogeneity_map = self._create_inhomogeneity_map()
+
+        # --- Feature map ---
         self._features = {
-            "ExposureTime": FakeFeature("ExposureTime", 10000.0, 1000.0, 50000.0),
+            "ExposureTime": FakeFeature(
+                "ExposureTime",
+                10000.0,
+                1000.0,
+                100000.0,
+                increment=100.0,
+                on_change=self._on_exposure_change,
+            ),
+            "Gain": FakeFeature(
+                "Gain",
+                self._gain_db,
+                self._gain_limits[0],
+                self._gain_limits[1],
+                increment=0.1,
+                on_change=self._on_gain_change,
+            ),
+            "GainAuto": FakeEnumFeature(
+                "GainAuto",
+                ("Off", "Once"),
+                "Off",
+                on_change=self._on_gain_auto_change,
+            ),
         }
 
-        min_exp, _ = self._features["ExposureTime"].get_range()
-        self._min_exposure_us = float(min_exp)
-        short_exposure_factor = self._min_exposure_us / 20000.0
-        estimated_peak = self.amplitude_range[1] * short_exposure_factor
-        self.background_noise_std = max(1.0, estimated_peak * self.background_noise_fraction)
-        self.read_noise_level = max(1.0, estimated_peak * self.read_noise_fraction)
+        # Derived noise calibration
+        self._recompute_noise_model()
+
+    # ----- Feature callbacks -----
+
+    def _on_exposure_change(self, _value: float) -> None:
+        self._recompute_noise_model()
+
+    def _on_gain_change(self, value: float) -> None:
+        with self._control_lock:
+            self._gain_db = float(value)
+
+    def _on_gain_auto_change(self, value: Union[str, int]) -> None:
+        if isinstance(value, str) and value.lower() == "once":
+            with self._control_lock:
+                self._gain_auto_pending = True
+
+    # ----- Public configuration helpers -----
+
+    def get_control_snapshot(self) -> Dict[str, float]:
+        with self._control_lock:
+            return {
+                "beam_fwhm": float(self._beam_fwhm),
+                "beam_peak": float(self._beam_peak),
+                "beam_fluctuation": float(self._beam_fluctuation),
+                "background_level": float(self._background_level),
+                "background_gradient": float(self._background_gradient_strength),
+                "background_inhomogeneity": float(self._background_inhomogeneity_strength),
+                "gain_db": float(self._gain_db),
+                "exposure_us": float(self._features["ExposureTime"].get()),
+            }
+
+    def update_controls(
+        self,
+        *,
+        beam_fwhm: Optional[float] = None,
+        beam_peak: Optional[float] = None,
+        beam_fluctuation: Optional[float] = None,
+        background_level: Optional[float] = None,
+        background_gradient: Optional[float] = None,
+        background_inhomogeneity: Optional[float] = None,
+    ) -> Dict[str, float]:
+        with self._control_lock:
+            if beam_fwhm is not None:
+                self._beam_fwhm = float(np.clip(beam_fwhm, 6.0, min(self.width, self.height)))
+            if beam_peak is not None:
+                self._beam_peak = float(np.clip(beam_peak, 100.0, 60000.0))
+            if beam_fluctuation is not None:
+                self._beam_fluctuation = float(np.clip(beam_fluctuation, 0.0, 0.5))
+            if background_level is not None:
+                self._background_level = float(np.clip(background_level, 0.0, 5000.0))
+            if background_gradient is not None:
+                self._background_gradient_strength = float(np.clip(background_gradient, 0.0, 5000.0))
+            if background_inhomogeneity is not None:
+                self._background_inhomogeneity_strength = float(np.clip(background_inhomogeneity, 0.0, 5000.0))
+
+            self._recompute_noise_model()
+            return self.get_control_snapshot()
 
     def get_id(self) -> str:
         return self._id
@@ -141,11 +279,15 @@ class FakeCamera:
     def set_pixel_format(self, fmt: PixelFormat):
         self._logger.info(f"FakeCamera: Pixel format set to {fmt.name}")
 
-    def get_feature_by_name(self, name: str) -> FakeFeature:
+    def get_feature_by_name(self, name: str):
         if name in self._features:
             return self._features[name]
         if "ExposureTime" in name:
             return self._features["ExposureTime"]
+        if name == "GainAuto":
+            return self._features["GainAuto"]
+        if name == "Gain":
+            return self._features["Gain"]
         raise AttributeError(f"Feature '{name}' not found in FakeCamera")
 
     def start_streaming(self, handler: Callable, buffer_count: int = 5):
@@ -155,8 +297,8 @@ class FakeCamera:
         self._logger.info("FakeCamera: Starting stream...")
         self._handler = handler
         self._running = True
-        self._initialize_beams()
-        self._initialize_static_gradient()
+        with self._control_lock:
+            self._gain_auto_pending = False
         self._thread = threading.Thread(target=self._generate_frames, daemon=True)
         self._thread.start()
 
@@ -171,78 +313,34 @@ class FakeCamera:
         self._handler = None
         self._logger.info("FakeCamera: Stream stopped.")
 
-    def _initialize_beams(self):
-        """Initializes beams with random positions and shape parameters."""
-        self._beams = []
-        num_beams = 3
-        margin_x = self.width * 0.1
-        margin_y = self.height * 0.1
-        for _ in range(num_beams):
-            cx = self._rng.uniform(margin_x, self.width - margin_x)
-            cy = self._rng.uniform(margin_y, self.height - margin_y)
-            angle = self._rng.uniform(0.0, np.pi)
-            sigma_major = self._rng.uniform(self.sigma_range[0], self.sigma_range[1])
-            aspect_ratio = self._rng.uniform(0.3, 1.0)
-            sigma_minor = sigma_major * aspect_ratio
-            amp = self._rng.uniform(self.amplitude_range[0], self.amplitude_range[1])
-            self._beams.append({
-                'center': (cx, cy),
-                'amplitude': amp,
-                'base_amplitude': amp,
-                'cov_matrix': self._create_covariance_matrix(sigma_major, sigma_minor, angle)
-            })
+    @staticmethod
+    def _fwhm_to_sigma(fwhm_px: float) -> float:
+        return max(1.0, float(fwhm_px) / (2.0 * np.sqrt(2.0 * np.log(2.0))))
 
-    def _initialize_static_gradient(self):
-        """Generates a simpler, static, non-uniform background."""
+    def _create_gradient_map(self) -> np.ndarray:
         y_coords, x_coords = np.mgrid[0:self.height, 0:self.width]
-        gradient = (x_coords / self.width + y_coords / self.height) * 0.5
-        self._static_gradient = gradient * self.background_gradient_strength
+        gradient = (x_coords / max(1, self.width - 1) + y_coords / max(1, self.height - 1)) * 0.5
+        return gradient.astype(np.float32)
 
-    def _create_covariance_matrix(self, sx, sy, angle):
-        cos_a, sin_a = np.cos(angle), np.sin(angle)
-        R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-        S = np.array([[sx**2, 0], [0, sy**2]])
-        return R @ S @ R.T
+    def _create_inhomogeneity_map(self) -> np.ndarray:
+        base_noise = self._rng.normal(0.0, 1.0, (self.height, self.width)).astype(np.float32)
+        smooth = cv2.GaussianBlur(base_noise, (0, 0), sigmaX=25.0, sigmaY=25.0, borderType=cv2.BORDER_REFLECT)
+        smooth -= smooth.min()
+        denom = smooth.max() - smooth.min()
+        if denom <= 0:
+            denom = 1.0
+        smooth /= denom
+        return smooth
 
-    def _update_beams(self):
-        for beam in self._beams:
-            dx = self._rng.normal(0, self.drift_position_std_dev)
-            dy = self._rng.normal(0, self.drift_position_std_dev)
-            beam['center'] = (beam['center'][0] + dx, beam['center'][1] + dy)
-
-            base_amp = beam.get('base_amplitude', beam['amplitude'])
-            variation = self._rng.uniform(-self.max_amplitude_variation, self.max_amplitude_variation)
-            target_amp = base_amp * (1.0 + variation)
-            updated = 0.9 * beam['amplitude'] + 0.1 * target_amp
-            lower = base_amp * (1.0 - self.max_amplitude_variation)
-            upper = base_amp * (1.0 + self.max_amplitude_variation)
-            beam['amplitude'] = float(np.clip(updated, lower, upper))
-
-    def _generate_gaussian_patch(self, beam: dict) -> Tuple[np.ndarray, Tuple[int, int]]:
-        """Generates a Gaussian beam on a smaller patch for performance."""
-        center_x, center_y = beam['center']
-        # Estimate sigma from the covariance matrix for patch size calculation
-        sx = np.sqrt(abs(beam['cov_matrix'][0, 0]))
-        sy = np.sqrt(abs(beam['cov_matrix'][1, 1]))
-        patch_half_size = int(3 * max(sx, sy)) # Use a generous patch size
-
-        x_start = max(0, int(center_x - patch_half_size))
-        x_end = min(self.width, int(center_x + patch_half_size))
-        y_start = max(0, int(center_y - patch_half_size))
-        y_end = min(self.height, int(center_y + patch_half_size))
-
-        if x_start >= x_end or y_start >= y_end:
-            return np.array([[]]), (0, 0)
-
-        y_patch, x_patch = np.mgrid[y_start:y_end, x_start:x_end]
-
-        cov_inv = np.linalg.inv(beam['cov_matrix'])
-        pos = np.dstack((x_patch, y_patch))
-        diff = pos - beam['center']
-        exponent = -0.5 * np.einsum('...k,kl,...l->...', diff, cov_inv, diff)
-
-        patch = beam['amplitude'] * np.exp(exponent)
-        return patch, (y_start, x_start)
+    def _recompute_noise_model(self) -> None:
+        with self._control_lock:
+            exp_us = float(self._features["ExposureTime"].get())
+            exposure_factor = max(exp_us / self._exposure_reference, 1e-4)
+            expected_peak = self._beam_peak * exposure_factor
+            baseline = self._background_level * exposure_factor
+            combined = max(1.0, expected_peak + baseline)
+            self._shot_noise_scale = np.sqrt(combined) * 0.15
+            self._read_noise_std = max(3.0, combined * 0.002)
 
     def _generate_frames(self):
         frame_duration = 1.0 / self.fps
@@ -250,32 +348,64 @@ class FakeCamera:
         while self._running:
             start_time = time.monotonic()
 
-            # 1. Base Canvas (ideal signal, float32 for calculations)
-            ideal_frame = np.full((self.height, self.width), float(self.background_level), dtype=np.float32)
+            with self._control_lock:
+                exposure_us = float(self._features["ExposureTime"].get())
+                gain_db = float(self._gain_db)
+                beam_fwhm = float(self._beam_fwhm)
+                base_peak = float(self._beam_peak)
+                fluctuation = float(self._beam_fluctuation)
+                background_level = float(self._background_level)
+                gradient_strength = float(self._background_gradient_strength)
+                inhom_strength = float(self._background_inhomogeneity_strength)
+                perform_gain_auto = self._gain_auto_pending
+                if perform_gain_auto:
+                    self._gain_auto_pending = False
 
-            # 2. Add static background gradient
-            if self._static_gradient is not None:
-                ideal_frame += self._static_gradient
+            if perform_gain_auto:
+                self._auto_tune_gain(exposure_us)
+                with self._control_lock:
+                    self._features["GainAuto"].set_internal("Off")
 
-            # 3. Add synthetic beams (optimized)
-            self._update_beams()
-            for beam in self._beams:
-                patch, (y_start, x_start) = self._generate_gaussian_patch(beam)
-                if patch.size > 0:
-                    y_end, x_end = y_start + patch.shape[0], x_start + patch.shape[1]
-                    ideal_frame[y_start:y_end, x_start:x_end] += patch
+            exposure_factor = max(exposure_us / self._exposure_reference, 1e-6)
+            gain_factor = 10.0 ** (gain_db / 20.0)
 
-            # 4. Exposure Simulation (linear scaling of ideal signal)
-            exposure_us = self._features["ExposureTime"].get()
-            exposure_factor = exposure_us / 20000.0
-            exposed_frame = ideal_frame * exposure_factor
+            # Base background
+            background = (
+                background_level
+                + gradient_strength * self._gradient_map
+                + inhom_strength * self._inhomogeneity_map
+            ).astype(np.float32)
 
-            # 5. Noise Simulation (exposure-independent)
-            background_noise = self._rng.normal(0.0, self.background_noise_std, ideal_frame.shape).astype(np.float32)
-            read_noise = self._rng.normal(0.0, self.read_noise_level, ideal_frame.shape).astype(np.float32)
-            noisy_frame = exposed_frame + background_noise + read_noise
+            # Gaussian beam rendering (isotropic)
+            sigma = self._fwhm_to_sigma(beam_fwhm)
+            patch_radius = int(max(6.0, sigma * 3.5))
+            cx, cy = self._beam_center
+            x_start = max(0, int(cx - patch_radius))
+            x_end = min(self.width, int(cx + patch_radius + 1))
+            y_start = max(0, int(cy - patch_radius))
+            y_end = min(self.height, int(cy + patch_radius + 1))
 
-            # 6. Convert to final 16-bit format
+            if x_start >= x_end or y_start >= y_end:
+                signal = np.zeros_like(background)
+            else:
+                y_patch, x_patch = np.mgrid[y_start:y_end, x_start:x_end]
+                dx = x_patch - cx
+                dy = y_patch - cy
+                exponent = -0.5 * ((dx * dx + dy * dy) / (sigma * sigma))
+                frame_peak = base_peak * max(0.0, 1.0 + self._rng.normal(0.0, fluctuation))
+                # enforce positive intensity
+                frame_peak = max(0.0, frame_peak)
+                gaussian_patch = frame_peak * np.exp(exponent)
+                signal = np.zeros_like(background)
+                signal[y_start:y_end, x_start:x_end] += gaussian_patch.astype(np.float32)
+
+            ideal_frame = (background + signal) * exposure_factor * gain_factor
+
+            # Noise simulation (shot + read)
+            shot_noise = self._rng.normal(0.0, self._shot_noise_scale, ideal_frame.shape).astype(np.float32)
+            read_noise = self._rng.normal(0.0, self._read_noise_std, ideal_frame.shape).astype(np.float32)
+            noisy_frame = ideal_frame + shot_noise * np.sqrt(np.clip(ideal_frame, 0.0, None)) + read_noise
+
             final_frame = np.clip(noisy_frame, 0, 65535).astype(np.uint16)
 
             # --- Frame delivery ---
@@ -293,6 +423,22 @@ class FakeCamera:
             sleep_duration = max(0, frame_duration - elapsed)
             time.sleep(sleep_duration)
 
+    def _auto_tune_gain(self, exposure_us: float) -> None:
+        with self._control_lock:
+            current_gain = self._gain_db
+            current_peak = self._beam_peak
+        exposure_factor = max(exposure_us / self._exposure_reference, 1e-6)
+        linear_signal = current_peak * exposure_factor
+        if linear_signal <= 0.0:
+            target_gain = self._gain_limits[0]
+        else:
+            target_fraction = 0.65  # aim for 65% of full scale
+            desired_linear = target_fraction * 65535.0
+            gain_linear = desired_linear / linear_signal
+            gain_linear = max(10 ** (self._gain_limits[0] / 20.0), min(10 ** (self._gain_limits[1] / 20.0), gain_linear))
+            target_gain = 20.0 * np.log10(gain_linear)
+        self._features["Gain"].set(target_gain)
+
     def __enter__(self):
         return self
 
@@ -301,21 +447,26 @@ class FakeCamera:
 
     def generate_background_frame(self) -> np.ndarray:
         """Generates a noise-only frame as a NumPy array."""
-        ideal_frame = np.full((self.height, self.width), float(self.background_level), dtype=np.float32)
+        with self._control_lock:
+            exposure_us = float(self._features["ExposureTime"].get())
+            gain_db = float(self._gain_db)
+            background_level = float(self._background_level)
+            gradient_strength = float(self._background_gradient_strength)
+            inhom_strength = float(self._background_inhomogeneity_strength)
 
-        if self._static_gradient is not None:
-            ideal_frame += self._static_gradient
+        exposure_factor = max(exposure_us / self._exposure_reference, 1e-6)
+        gain_factor = 10.0 ** (gain_db / 20.0)
+        background = (
+            background_level
+            + gradient_strength * self._gradient_map
+            + inhom_strength * self._inhomogeneity_map
+        ).astype(np.float32)
 
-        exposure_us = self._features["ExposureTime"].get()
-        exposure_factor = exposure_us / 20000.0
-        exposed_frame = ideal_frame * exposure_factor
-
-        background_noise = self._rng.normal(0.0, self.background_noise_std, ideal_frame.shape).astype(np.float32)
-        read_noise = self._rng.normal(0.0, self.read_noise_level, ideal_frame.shape).astype(np.float32)
-        noisy_frame = exposed_frame + background_noise + read_noise
-
-        final_frame = np.clip(noisy_frame, 0, 65535).astype(np.uint16)
-        return final_frame
+        ideal_frame = background * exposure_factor * gain_factor
+        shot_noise = self._rng.normal(0.0, self._shot_noise_scale, ideal_frame.shape).astype(np.float32)
+        read_noise = self._rng.normal(0.0, self._read_noise_std, ideal_frame.shape).astype(np.float32)
+        noisy_frame = ideal_frame + shot_noise * np.sqrt(np.clip(ideal_frame, 0.0, None)) + read_noise
+        return np.clip(noisy_frame, 0, 65535).astype(np.uint16)
 
 # Example usage (for testing)
 if __name__ == '__main__':

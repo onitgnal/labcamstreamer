@@ -17,6 +17,19 @@
   const startBgSubtractionBtn = qs('#startBgSubtraction');
   const numFramesInput = qs('#numFrames');
   const autoExposureBtn = qs('#autoExposureBtn');
+  const fakeCamPanel = qs('#fakeCamPanel');
+  const fakeBeamSize = qs('#fakeBeamSize');
+  const fakeBeamSizeValue = qs('#fakeBeamSizeValue');
+  const fakeBeamPeak = qs('#fakeBeamPeak');
+  const fakeBeamPeakValue = qs('#fakeBeamPeakValue');
+  const fakeBeamFluctuation = qs('#fakeBeamFluctuation');
+  const fakeBeamFluctuationValue = qs('#fakeBeamFluctuationValue');
+  const fakeBackgroundLevel = qs('#fakeBackgroundLevel');
+  const fakeBackgroundLevelValue = qs('#fakeBackgroundLevelValue');
+  const fakeBackgroundGradient = qs('#fakeBackgroundGradient');
+  const fakeBackgroundGradientValue = qs('#fakeBackgroundGradientValue');
+  const fakeBackgroundInhomogeneity = qs('#fakeBackgroundInhomogeneity');
+  const fakeBackgroundInhomogeneityValue = qs('#fakeBackgroundInhomogeneityValue');
 
   const expSlider = qs('#expSlider');
   const expLabel = qs('#expLabel');
@@ -119,13 +132,15 @@
   let causticImportActive = false;
 
   const SATURATION_THRESHOLD = 250;
-  const AUTO_EXPOSURE_TARGET = 0.9;
+  const AUTO_EXPOSURE_TARGET = 0.8;
   const AUTO_EXPOSURE_TOLERANCE = 0.02;
   let autoExposureEnabled = false;
   let autoExposureLoopTimer = null;
   let autoExposureBusy = false;
   let backgroundEnabled = false;
   let hasBackgroundFrame = false;
+  let fakeCamConfig = null;
+  let fakeCamBusy = false;
   // ----- REST helpers -----
   async function logToServer(level, message, data) {
     try {
@@ -511,6 +526,123 @@
     expSlider.disabled = shouldDisable;
   }
 
+  function isFakeCameraSelected() {
+    return !!(cameraSelect && cameraSelect.value === 'fake');
+  }
+
+  function isFakeCameraActive() {
+    return isFakeCameraSelected() && !!(cameraToggle && cameraToggle.checked);
+  }
+
+  function setFakeCameraInputsDisabled(disabled) {
+    if (!fakeCamPanel) return;
+    const inputs = [
+      fakeBeamSize,
+      fakeBeamPeak,
+      fakeBeamFluctuation,
+      fakeBackgroundLevel,
+      fakeBackgroundGradient,
+      fakeBackgroundInhomogeneity,
+    ];
+    inputs.forEach((input) => {
+      if (input) input.disabled = !!disabled;
+    });
+    fakeCamPanel.classList.toggle('disabled', !!disabled);
+  }
+
+  function setFakeCameraLabel(el, value, { digits = 0, suffix = '' } = {}) {
+    if (!el) return;
+    if (value == null || Number.isNaN(value)) {
+      el.textContent = '-';
+      return;
+    }
+    const factor = 10 ** digits;
+    const rounded = Math.round(value * factor) / factor;
+    el.textContent = suffix ? `${rounded}${suffix}` : String(rounded);
+  }
+
+  function applyFakeCameraConfig(cfg) {
+    if (!cfg) return;
+    fakeCamConfig = cfg;
+    if (fakeBeamSize) {
+      fakeBeamSize.value = String(Math.round(cfg.beam_fwhm ?? fakeBeamSize.value));
+      setFakeCameraLabel(fakeBeamSizeValue, cfg.beam_fwhm, { digits: 0, suffix: ' px' });
+    }
+    if (fakeBeamPeak) {
+      fakeBeamPeak.value = String(Math.round(cfg.beam_peak ?? fakeBeamPeak.value));
+      setFakeCameraLabel(fakeBeamPeakValue, cfg.beam_peak, { digits: 0 });
+    }
+    if (fakeBeamFluctuation) {
+      const percent = (cfg.beam_fluctuation ?? 0) * 100;
+      fakeBeamFluctuation.value = String(Math.round((cfg.beam_fluctuation ?? 0) * 100) / 100);
+      setFakeCameraLabel(fakeBeamFluctuationValue, percent, { digits: 1, suffix: '%' });
+    }
+    if (fakeBackgroundLevel) {
+      fakeBackgroundLevel.value = String(Math.round(cfg.background_level ?? fakeBackgroundLevel.value));
+      setFakeCameraLabel(fakeBackgroundLevelValue, cfg.background_level, { digits: 0 });
+    }
+    if (fakeBackgroundGradient) {
+      fakeBackgroundGradient.value = String(Math.round(cfg.background_gradient ?? fakeBackgroundGradient.value));
+      setFakeCameraLabel(fakeBackgroundGradientValue, cfg.background_gradient, { digits: 0 });
+    }
+    if (fakeBackgroundInhomogeneity) {
+      fakeBackgroundInhomogeneity.value = String(Math.round(cfg.background_inhomogeneity ?? fakeBackgroundInhomogeneity.value));
+      setFakeCameraLabel(fakeBackgroundInhomogeneityValue, cfg.background_inhomogeneity, { digits: 0 });
+    }
+    if (fakeCamPanel) {
+      delete fakeCamPanel.dataset.error;
+    }
+  }
+
+  async function refreshFakeCameraConfig(force = false) {
+    if (!fakeCamPanel || (!force && fakeCamBusy)) return;
+    if (!isFakeCameraActive()) {
+      setFakeCameraInputsDisabled(true);
+      return;
+    }
+    fakeCamBusy = true;
+    try {
+      const cfg = await getJSON('/fake_camera/config');
+      applyFakeCameraConfig(cfg);
+      setFakeCameraInputsDisabled(false);
+    } catch (error) {
+      const friendly = parseServerError(error);
+      setFakeCameraInputsDisabled(true);
+      if (fakeCamPanel) fakeCamPanel.dataset.error = friendly;
+      logToServer('warn', 'Fake camera config unavailable', { error: friendly });
+    } finally {
+      fakeCamBusy = false;
+    }
+  }
+
+  async function pushFakeCameraConfig(partial) {
+    if (!partial || !isFakeCameraActive() || fakeCamBusy) return;
+    fakeCamBusy = true;
+    try {
+      const cfg = await postJSON('/fake_camera/config', partial);
+      applyFakeCameraConfig(cfg);
+      logToServer('info', 'Fake camera config updated', partial);
+    } catch (error) {
+      const friendly = parseServerError(error);
+      showToast(`Fake camera update failed: ${friendly}`, { variant: 'error', duration: 6000 });
+      logToServer('error', 'Fake camera update failed', { error: friendly, payload: partial });
+    } finally {
+      fakeCamBusy = false;
+      setFakeCameraInputsDisabled(!isFakeCameraActive());
+    }
+  }
+
+  function applyFakeCameraPanelState() {
+    if (!fakeCamPanel) return;
+    const selected = isFakeCameraSelected();
+    fakeCamPanel.hidden = !selected;
+    const disabled = !isFakeCameraActive();
+    setFakeCameraInputsDisabled(disabled);
+    if (!disabled && selected) {
+      window.setTimeout(() => refreshFakeCameraConfig(true), 150);
+    }
+  }
+
   function updateAutoExposureUI() {
     if (!autoExposureBtn) return;
     const label = autoExposureEnabled ? 'Auto exposure: On' : 'Auto exposure: Off';
@@ -523,10 +655,10 @@
       const current = autoExposureBtn.getAttribute('title');
       autoExposureBtn.setAttribute(
         'title',
-        current || 'Auto exposure is keeping the peak near 90%. Click to stop.',
+        current || 'Auto exposure is keeping the peak near 80%. Click to stop.',
       );
     } else {
-      autoExposureBtn.setAttribute('title', 'Enable auto exposure to keep the peak near 90%.');
+      autoExposureBtn.setAttribute('title', 'Enable auto exposure to keep the peak near 80%.');
     }
   }
 
@@ -661,6 +793,7 @@
   updateAutoExposureUI();
   updateExposureWidgetsDisabledState();
   setAutoExposureDisabled(!(cameraToggle && cameraToggle.checked));
+  applyFakeCameraPanelState();
 
 
 
@@ -2197,6 +2330,7 @@
       }
     } catch (_) {}
     setAutoExposureDisabled(!cameraToggle.checked);
+    applyFakeCameraPanelState();
   }
 
   if (autoExposureBtn) {
@@ -2233,6 +2367,7 @@
     cameraSelect.disabled = enabled; // Disable selector when camera is on
     setAutoExposureDisabled(!enabled);
     if (captureBackgroundBtn) captureBackgroundBtn.disabled = !enabled;
+    setFakeCameraInputsDisabled(true);
     try {
       const res = await postJSON('/camera', { enabled, camera_id: cameraId });
       const success = !!res.enabled;
@@ -2241,6 +2376,7 @@
       setAutoExposureDisabled(!success);
       if (captureBackgroundBtn) captureBackgroundBtn.disabled = !success;
       stream.src = success ? '/video_feed?ts=' + Date.now() : '';
+      applyFakeCameraPanelState();
       if (!success && res.error) {
         logToServer('error', 'Failed to toggle camera', { error: res.error });
         alert(`Error: ${res.error}`);
@@ -2248,12 +2384,98 @@
     } catch (e) {
       logToServer('error', 'Failed to toggle camera', { error: e.toString() });
       cameraToggle.checked = !enabled;
-      cameraSelect.disabled = !enabled;
+      cameraSelect.disabled = cameraToggle.checked;
       setAutoExposureDisabled(!cameraToggle.checked);
       if (captureBackgroundBtn) captureBackgroundBtn.disabled = !cameraToggle.checked;
+      applyFakeCameraPanelState();
     }
     await refreshBackgroundStatus();
   });
+
+  if (cameraSelect) {
+    cameraSelect.addEventListener('change', () => {
+      applyFakeCameraPanelState();
+    });
+  }
+
+  if (fakeBeamSize) {
+    fakeBeamSize.addEventListener('input', () => {
+      const value = parseFloat(fakeBeamSize.value);
+      setFakeCameraLabel(fakeBeamSizeValue, Number.isFinite(value) ? value : null, { digits: 0, suffix: ' px' });
+    });
+    fakeBeamSize.addEventListener('change', () => {
+      const value = parseFloat(fakeBeamSize.value);
+      if (Number.isFinite(value)) {
+        pushFakeCameraConfig({ beam_fwhm: value });
+      }
+    });
+  }
+
+  if (fakeBeamPeak) {
+    fakeBeamPeak.addEventListener('input', () => {
+      const value = parseFloat(fakeBeamPeak.value);
+      setFakeCameraLabel(fakeBeamPeakValue, Number.isFinite(value) ? value : null, { digits: 0 });
+    });
+    fakeBeamPeak.addEventListener('change', () => {
+      const value = parseFloat(fakeBeamPeak.value);
+      if (Number.isFinite(value)) {
+        pushFakeCameraConfig({ beam_peak: value });
+      }
+    });
+  }
+
+  if (fakeBeamFluctuation) {
+    fakeBeamFluctuation.addEventListener('input', () => {
+      const value = parseFloat(fakeBeamFluctuation.value);
+      const percent = Number.isFinite(value) ? value * 100 : null;
+      setFakeCameraLabel(fakeBeamFluctuationValue, percent, { digits: 1, suffix: '%' });
+    });
+    fakeBeamFluctuation.addEventListener('change', () => {
+      const value = parseFloat(fakeBeamFluctuation.value);
+      if (Number.isFinite(value)) {
+        pushFakeCameraConfig({ beam_fluctuation: value });
+      }
+    });
+  }
+
+  if (fakeBackgroundLevel) {
+    fakeBackgroundLevel.addEventListener('input', () => {
+      const value = parseFloat(fakeBackgroundLevel.value);
+      setFakeCameraLabel(fakeBackgroundLevelValue, Number.isFinite(value) ? value : null, { digits: 0 });
+    });
+    fakeBackgroundLevel.addEventListener('change', () => {
+      const value = parseFloat(fakeBackgroundLevel.value);
+      if (Number.isFinite(value)) {
+        pushFakeCameraConfig({ background_level: value });
+      }
+    });
+  }
+
+  if (fakeBackgroundGradient) {
+    fakeBackgroundGradient.addEventListener('input', () => {
+      const value = parseFloat(fakeBackgroundGradient.value);
+      setFakeCameraLabel(fakeBackgroundGradientValue, Number.isFinite(value) ? value : null, { digits: 0 });
+    });
+    fakeBackgroundGradient.addEventListener('change', () => {
+      const value = parseFloat(fakeBackgroundGradient.value);
+      if (Number.isFinite(value)) {
+        pushFakeCameraConfig({ background_gradient: value });
+      }
+    });
+  }
+
+  if (fakeBackgroundInhomogeneity) {
+    fakeBackgroundInhomogeneity.addEventListener('input', () => {
+      const value = parseFloat(fakeBackgroundInhomogeneity.value);
+      setFakeCameraLabel(fakeBackgroundInhomogeneityValue, Number.isFinite(value) ? value : null, { digits: 0 });
+    });
+    fakeBackgroundInhomogeneity.addEventListener('change', () => {
+      const value = parseFloat(fakeBackgroundInhomogeneity.value);
+      if (Number.isFinite(value)) {
+        pushFakeCameraConfig({ background_inhomogeneity: value });
+      }
+    });
+  }
 
   if (saveAllBtn) {
     saveAllBtn.addEventListener('click', async () => {

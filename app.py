@@ -1533,7 +1533,7 @@ def exposure():
 @app.route("/exposure/auto", methods=["POST"])
 def exposure_auto():
     data = request.get_json(silent=True) or {}
-    target_fraction = 0.9
+    target_fraction = 0.8
     tolerance = 0.05
     if "target_fraction" in data:
         try:
@@ -1557,6 +1557,50 @@ def exposure_auto():
         return jsonify({"error": str(exc)}), 409
     except Exception as exc:
         app.logger.error(f"Auto exposure failed: {exc}", exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/fake_camera/config", methods=["GET", "POST"])
+def fake_camera_config():
+    snapshot = cam_service.get_fake_camera_controls()
+    if request.method == "GET":
+        if snapshot is None:
+            return jsonify({"error": "Fake camera not active."}), 409
+        return jsonify(snapshot)
+
+    if snapshot is None:
+        return jsonify({"error": "Fake camera not active."}), 409
+
+    data = request.get_json(silent=True) or {}
+    key_map = {
+        "beam_fwhm": "beam_fwhm",
+        "beam_size": "beam_fwhm",
+        "beam_peak": "beam_peak",
+        "beam_brightness": "beam_peak",
+        "beam_fluctuation": "beam_fluctuation",
+        "background_level": "background_level",
+        "background_strength": "background_level",
+        "background_gradient": "background_gradient",
+        "background_inhomogeneity": "background_inhomogeneity",
+    }
+    updates: Dict[str, float] = {}
+    for key, target in key_map.items():
+        if key in data:
+            try:
+                updates[target] = float(data[key])
+            except (TypeError, ValueError):
+                return jsonify({"error": f"Invalid value for {key}"}), 400
+
+    if not updates:
+        return jsonify({"error": "No valid parameters provided."}), 400
+
+    try:
+        updated = cam_service.update_fake_camera_controls(**updates)
+        return jsonify(updated)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+    except Exception as exc:
+        app.logger.error(f"Failed to update fake camera config: {exc}", exc_info=True)
         return jsonify({"error": str(exc)}), 500
 
 # Colormap GET/POST

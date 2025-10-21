@@ -29,7 +29,7 @@
             <input id="backgroundSubtractionToggle" type="checkbox" />
           </label>
           <button id="captureBackgroundBtn" class="secondary" type="button" title="Capture and save an averaged background image.">Capture background</button>
-          <button id="autoExposureBtn" class="secondary" type="button" aria-pressed="false" title="Enable auto exposure to keep the peak near 90%.">Auto exposure: Off</button>
+          <button id="autoExposureBtn" class="secondary" type="button" aria-pressed="false" title="Enable auto exposure to keep the peak near 80%.">Auto exposure: Off</button>
         </div>
       </section>
 
@@ -44,6 +44,41 @@
             <input id="expSlider" type="range" min="1" max="1000000" step="1000" />
             <span id="expLabel" class="mono">-</span>
           </div>
+        </section>
+
+        <section id="fakeCamPanel" class="panel" hidden>
+          <h2>Fake Camera</h2>
+          <p class="hint">Adjust the synthetic beam to exercise auto exposure.</p>
+          <label class="row space fake-slider" for="fakeBeamSize">
+            <span>Beam size (FWHM px)</span>
+            <input id="fakeBeamSize" type="range" min="6" max="400" step="1" />
+            <span id="fakeBeamSizeValue" class="mono">-</span>
+          </label>
+          <label class="row space fake-slider" for="fakeBeamPeak">
+            <span>Beam peak (a.u.)</span>
+            <input id="fakeBeamPeak" type="range" min="500" max="60000" step="100" />
+            <span id="fakeBeamPeakValue" class="mono">-</span>
+          </label>
+          <label class="row space fake-slider" for="fakeBeamFluctuation">
+            <span>Beam fluctuation</span>
+            <input id="fakeBeamFluctuation" type="range" min="0" max="0.5" step="0.01" />
+            <span id="fakeBeamFluctuationValue" class="mono">-</span>
+          </label>
+          <label class="row space fake-slider" for="fakeBackgroundLevel">
+            <span>Background level</span>
+            <input id="fakeBackgroundLevel" type="range" min="0" max="5000" step="50" />
+            <span id="fakeBackgroundLevelValue" class="mono">-</span>
+          </label>
+          <label class="row space fake-slider" for="fakeBackgroundGradient">
+            <span>Background gradient</span>
+            <input id="fakeBackgroundGradient" type="range" min="0" max="5000" step="50" />
+            <span id="fakeBackgroundGradientValue" class="mono">-</span>
+          </label>
+          <label class="row space fake-slider" for="fakeBackgroundInhomogeneity">
+            <span>Background inhomogeneity</span>
+            <input id="fakeBackgroundInhomogeneity" type="range" min="0" max="5000" step="50" />
+            <span id="fakeBackgroundInhomogeneityValue" class="mono">-</span>
+          </label>
         </section>
 
         <section class="panel">
@@ -287,4 +322,3 @@
   <div id="toastContainer" class="toast-container"></div>
 </body>
 </html>
-

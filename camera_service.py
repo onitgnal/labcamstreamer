@@ -43,6 +43,7 @@ from fake_camera import FakeCamera, FakeFrame
 
 # Camera display pixel format for OpenCV/JPEG
 OPENCV_DISPLAY_FORMAT = PixelFormat.Bgr8
+_AUTO_EXPOSURE_SMOOTH_CLUSTER_MIN = 12
 
 
 def _cubiczero_lut() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -195,6 +196,7 @@ class CameraService:
         self._exposure_lock = threading.Lock()
         self._colormap_lock = threading.Lock()
         self._sensor_lock = threading.Lock()
+        self._auto_peak_lock = threading.Lock()
 
         self._latest_bgr: Optional[np.ndarray] = None
         self._latest_gray: Optional[np.ndarray] = None
@@ -209,6 +211,7 @@ class CameraService:
         self._sensor_capture_enabled: bool = False
         self._sensor_capture_event = threading.Event()
         self._sensor_capture_generation: int = 0
+        self._auto_peak_ema: Optional[float] = None
 
     def set_default_camera_id(self, camera_id: str):
         self._logger.info(f"Default camera ID set to: {camera_id}")
@@ -222,6 +225,8 @@ class CameraService:
             self._sensor_capture_enabled = False
             self._sensor_capture_generation = 0
             self._sensor_capture_event.clear()
+        with self._auto_peak_lock:
+            self._auto_peak_ema = None
 
     def _sensor_capture_enabled_state(self) -> bool:
         with self._sensor_lock:
@@ -459,6 +464,8 @@ class CameraService:
         hot_gap_ratio: float = 8.0,
         hot_cluster_min: int = 4,
         max_cluster: int = 256,
+        noise_floor: float = 2.0,
+        tiny_cluster_threshold: int = 12,
     ) -> Dict[str, float]:
         """
         Analyse the brightest pixels in ``arr`` and return robust peak statistics.
@@ -509,7 +516,19 @@ class CameraService:
         top.sort()
         descending = top[::-1]
 
-        candidate_len = min(max_cluster, descending.size)
+        if not np.isfinite(noise_floor):
+            noise_floor = 0.0
+
+        signal_count = int(np.count_nonzero(descending > noise_floor)) if descending.size else 0
+        if signal_count <= 0:
+            signal_count = int(np.count_nonzero(descending > 0.0)) if descending.size else 0
+        if signal_count <= 0:
+            signal_count = descending.size
+
+        tiny_cluster_threshold = max(hot_cluster_min, min(int(tiny_cluster_threshold), max_cluster))
+
+        target_len = max(signal_count, hot_cluster_min)
+        candidate_len = min(descending.size, max_cluster, target_len)
         if candidate_len == 0:
             stats["robust"] = stats["max"]
             stats["cluster_size"] = 1 if stats["max"] > 0 else 0
@@ -549,12 +568,26 @@ class CameraService:
             trimmed = candidates[-tail_count:]
             drop_count = max(0, candidates.size - trimmed.size)
 
-        if trimmed.size >= 5:
-            robust_value = float(np.median(trimmed))
-        elif trimmed.size > 1:
-            robust_value = float(np.mean(trimmed))
+        if trimmed.size <= tiny_cluster_threshold:
+            top_value = float(trimmed[0])
+            if not np.isfinite(top_value) or top_value <= 0.0:
+                top_value = float(stats["max"])
+            stats["robust"] = top_value
+            stats["cluster_size"] = int(trimmed.size)
+            stats["dropped"] = int(drop_count)
+            stats["hot_gap"] = 1.0 if drop_count == 0 else float("inf")
+            return stats
+
+        top_frac = max(0.02, min(0.25, trimmed.size / max_cluster))
+        top_count = int(max(hot_cluster_min, round(trimmed.size * top_frac)))
+        top_count = max(1, min(trimmed.size, top_count))
+        top_slice = trimmed[:top_count]
+        if top_slice.size >= 4:
+            robust_value = float(np.mean(top_slice))
+        elif top_slice.size > 1:
+            robust_value = float(np.mean(top_slice))
         else:
-            robust_value = float(trimmed[0])
+            robust_value = float(top_slice[0])
 
         stats["robust"] = robust_value
         stats["cluster_size"] = int(trimmed.size)
@@ -566,6 +599,20 @@ class CameraService:
         if stats["cluster_size"] <= 3:
             stats["robust"] = float(stats["max"])
         return stats
+
+    def _smooth_auto_exposure_peak(self, value: float, *, alpha: float = 0.6) -> float:
+        if not np.isfinite(value) or value <= 0.0:
+            return value
+        alpha = float(alpha)
+        if alpha <= 0.0 or alpha >= 1.0:
+            alpha = 0.6
+        with self._auto_peak_lock:
+            previous = self._auto_peak_ema
+            if previous is None or not np.isfinite(previous) or previous <= 0.0:
+                self._auto_peak_ema = value
+            else:
+                self._auto_peak_ema = (alpha * value) + ((1.0 - alpha) * previous)
+            return self._auto_peak_ema or value
 
     # ---------- Lifecycle ----------
 
@@ -934,6 +981,7 @@ class CameraService:
                 if using_sensor and sensor_metrics
                 else None
             )
+            raw_peak_robust_raw = control_metrics.get("robust", 0.0) if control_metrics else control_peak
             raw_peak_robust = control_peak
             raw_fraction = control_fraction
             if not using_sensor and raw_metrics is not None:
@@ -948,6 +996,14 @@ class CameraService:
             raw_dropped = (
                 int(sensor_metrics.get("dropped", 0)) if using_sensor and sensor_metrics else int(raw_metrics.get("dropped", 0) if raw_metrics else 0)
             )
+
+            if raw_cluster_size >= _AUTO_EXPOSURE_SMOOTH_CLUSTER_MIN:
+                smoothed_peak = self._smooth_auto_exposure_peak(control_peak)
+                if smoothed_peak > 0.0:
+                    control_peak = smoothed_peak
+            else:
+                with self._auto_peak_lock:
+                    self._auto_peak_ema = control_peak
 
             current_exp = max(1, self.get_exposure_us())
             min_exp = 10.0
@@ -1033,6 +1089,7 @@ class CameraService:
                 "frame_peak_fraction": float(frame_fraction),
                 "frame_peak_raw": float(raw_peak_max),
                 "frame_peak_raw_robust": float(raw_peak_robust),
+                "frame_peak_raw_robust_raw": float(raw_peak_robust_raw),
                 "frame_peak_raw_cluster_size": int(raw_cluster_size),
                 "frame_peak_raw_hot_pixels_ignored": int(raw_dropped),
                 "frame_peak_raw_fraction": float(raw_fraction),
@@ -1199,6 +1256,24 @@ class CameraService:
 
     def get_camera_id(self) -> Optional[str]:
         return self._active_camera_id
+
+    def _get_fake_camera(self) -> Optional[FakeCamera]:
+        cam = self._cam
+        if isinstance(cam, FakeCamera):
+            return cam
+        return None
+
+    def get_fake_camera_controls(self) -> Optional[Dict[str, float]]:
+        fake_cam = self._get_fake_camera()
+        if not fake_cam:
+            return None
+        return fake_cam.get_control_snapshot()
+
+    def update_fake_camera_controls(self, **kwargs) -> Dict[str, float]:
+        fake_cam = self._get_fake_camera()
+        if not fake_cam:
+            raise RuntimeError("Fake camera not active.")
+        return fake_cam.update_controls(**kwargs)
 
     def gen_overview_mjpeg(self):
         boundary = b"--frame\r\n"
