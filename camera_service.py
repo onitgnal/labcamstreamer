@@ -401,7 +401,7 @@ class CameraService:
         arr: Optional[np.ndarray],
         *,
         inspect_count: int = 4096,
-        hot_gap_ratio: float = 6.0,
+        hot_gap_ratio: float = 5.0,
         hot_cluster_min: int = 6,
         max_cluster: int = 256,
     ) -> Dict[str, float]:
@@ -452,46 +452,52 @@ class CameraService:
 
         top = np.partition(flat, count - inspect)[count - inspect:]
         top.sort()
-        working = top[::-1]  # descending view
+        descending = top[::-1]
 
-        dropped = 0
-        while working.size > 0:
-            if working.size == 1:
-                cluster_size = 1
-                gap_ratio = float("inf")
-            else:
-                denom = np.maximum(working[1:], 1e-6)
-                ratios = working[:-1] / denom
-                gap_index = int(np.argmax(ratios))
-                gap_ratio = float(ratios[gap_index])
-                if gap_ratio >= hot_gap_ratio:
-                    cluster_size = gap_index + 1
-                else:
-                    cluster_size = min(working.size, max_cluster)
+        candidate_len = min(max_cluster, descending.size)
+        if candidate_len == 0:
+            stats["robust"] = stats["max"]
+            stats["cluster_size"] = 1 if stats["max"] > 0 else 0
+            stats["hot_gap"] = float("inf")
+            return stats
 
-            cluster_values = working[:cluster_size]
+        candidates = descending[:candidate_len]
+        stats["max"] = float(candidates[0])
 
-            if cluster_values.size >= hot_cluster_min or working.size <= hot_cluster_min:
-                if cluster_values.size >= 4:
-                    robust_value = float(cluster_values[min(3, cluster_values.size - 1)])
-                elif cluster_values.size > 1:
-                    robust_value = float(np.mean(cluster_values))
-                else:
-                    robust_value = float(cluster_values[0])
-                stats["robust"] = robust_value
-                stats["cluster_size"] = int(cluster_values.size)
-                stats["dropped"] = int(dropped)
-                stats["hot_gap"] = gap_ratio if working.size > 1 else float("inf")
-                return stats
+        ref_idx = min(hot_cluster_min, candidates.size) - 1
+        reference = candidates[ref_idx]
+        if not np.isfinite(reference) or reference <= 0.0:
+            reference = float(np.median(candidates))
+            if reference <= 0.0:
+                reference = float(np.mean(candidates))
 
-            dropped += cluster_values.size
-            working = working[cluster_size:]
+        hot_threshold = reference * hot_gap_ratio if reference > 0.0 else float("inf")
+        drop_count = 0
+        if np.isfinite(hot_threshold):
+            while drop_count < candidates.size and candidates[drop_count] > hot_threshold:
+                drop_count += 1
 
-        # Fallback: no cluster satisfied criteria; fall back to the absolute max.
-        stats["robust"] = float(stats["max"])
-        stats["cluster_size"] = int(max(1, min(max_cluster, inspect - dropped if inspect > dropped else inspect)))
-        stats["dropped"] = int(dropped)
-        stats["hot_gap"] = float("inf")
+        trimmed = candidates[drop_count:]
+        if trimmed.size == 0:
+            # If everything above threshold was trimmed, fall back to the trailing window.
+            tail_count = min(hot_cluster_min, candidates.size)
+            trimmed = candidates[-tail_count:]
+            drop_count = max(0, candidates.size - trimmed.size)
+
+        if trimmed.size >= 5:
+            robust_value = float(np.median(trimmed))
+        elif trimmed.size > 1:
+            robust_value = float(np.mean(trimmed))
+        else:
+            robust_value = float(trimmed[0])
+
+        stats["robust"] = robust_value
+        stats["cluster_size"] = int(trimmed.size)
+        stats["dropped"] = int(drop_count)
+        if drop_count > 0 and drop_count < candidates.size:
+            stats["hot_gap"] = float(candidates[drop_count - 1] / max(candidates[drop_count], 1e-6))
+        else:
+            stats["hot_gap"] = 1.0 if drop_count == 0 else float("inf")
         return stats
 
     # ---------- Lifecycle ----------
@@ -768,7 +774,7 @@ class CameraService:
         except Exception:
             return False
 
-    def auto_adjust_exposure(self, target_fraction: float = 0.7, tolerance: float = 0.05) -> Dict[str, object]:
+    def auto_adjust_exposure(self, target_fraction: float = 0.9, tolerance: float = 0.05) -> Dict[str, object]:
         """
         Adjust exposure to target a peak intensity fraction of the sensor range.
         Optionally falls back to triggering camera gain auto if exposure limits are hit.

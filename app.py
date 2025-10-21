@@ -1530,7 +1530,7 @@ def exposure():
 @app.route("/exposure/auto", methods=["POST"])
 def exposure_auto():
     data = request.get_json(silent=True) or {}
-    target_fraction = 0.7
+    target_fraction = 0.9
     tolerance = 0.05
     if "target_fraction" in data:
         try:
