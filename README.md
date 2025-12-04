@@ -9,6 +9,7 @@ Python-only, cross-platform Flask app to stream an Allied Vision camera (vmbpy),
 - Metrics: per-frame ROI sum, exposure-corrected value/ms, rolling FPS (`/metrics`)
 - Bar Plot MJPEG at ~5 Hz: `/bar_feed`
 - ROI mini-streams at ~10 Hz each: `/roi_feed/<id>` (intensity-normalized per frame)
+- Beam quality / M^2 caustic workflow: capture ROI snapshots across z, run ISO 11146 fits, and export the dataset (CSV + PNG + BMP)
 - Save Data: downloads `<base>.zip` containing `<base>.json` + `<base>.png`
 
 ## Creator & Contact
@@ -96,6 +97,20 @@ Firewall note (Windows): allow Python inbound for local network access.
   - timestamp_iso, camera_id (None), frame_size (w,h), exposure_us, colormap, fps, rois (id,x,y,w,h)
 - NAME.png:
   - Current raw overview frame (BGR before colormap)
+
+## M^2 Beam Quality (Caustic) Workflow
+1. **Configure the caustic panel**
+   - Choose the working wavelength, stage position unit (mm by default), and which beam radii source to use (Gaussian 1/e^2 or second-moment/2-sigma).
+   - Provide the pixel size once (per ROI or via the panel); future caustic points reuse the last valid pixel size automatically.
+2. **Capture caustic points**
+   - Select an ROI, move the translation stage to the desired z position, and submit `z` via the "Add Caustic Point" button.
+   - Each point stores both radii sets (wx/wy for 1/e^2 and 2-sigma), along with profile/cross-section PNGs and the raw ROI snapshot saved as `YYYYMMDD_pixelsize_<value>_m_pos_<z>_<unit>.bmp` inside `caustic_cache/<point_id>/`.
+3. **Fit and inspect M^2**
+   - Once at least three points per axis exist, run the caustic fit to compute waist size w0, waist location z0, Rayleigh range zR', and M^2 values (plus 1-sigma uncertainties) for X and Y according to ISO 11146.
+   - Fit results are shown in the UI and persisted in `exports/caustic_autosave/latest/fits.json` together with the most recent dataset snapshot.
+4. **Export or import datasets**
+   - The "Save" action produces a ZIP under `exports/caustic_autosave/latest` (and makes it downloadable) containing `caustic_meta.json`, `caustic_points.csv`, `fits.json`, and all generated PNG/BMP assets.
+   - Existing caustic measurements can be imported from a folder or upload queue of BMP files named `*_pixelsize_<meters>_m_pos_<z_mm>_mm.bmp`; duplicates are skipped and new points become available immediately for M^2 fits.
 
 ## Notes
 - Gray computed once per frame; reused for metrics and ROI streams
