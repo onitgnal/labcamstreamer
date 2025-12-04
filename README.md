@@ -11,25 +11,40 @@ Python-only, cross-platform Flask app to stream an Allied Vision camera (vmbpy),
 - ROI mini-streams at ~10 Hz each: `/roi_feed/<id>` (intensity-normalized per frame)
 - Save Data: downloads `<base>.zip` containing `<base>.json` + `<base>.png`
 
+## Creator & Contact
+- Created and maintained by **Tino Lang** (<tino.lang@desy.de>) as the primary contact for questions, feedback, and support.
+
 ## Requirements
-- Python 3.10+
+- Pixi-managed Python 3.10 environment (handled automatically by `pixi install`)
 - vmbpy (Allied Vision SDK) installed and working (do not pip install) for Allied Vision cameras
 - Basler Pylon runtime + `pypylon` (installed automatically via Pixi on Windows) for Basler cameras
-- pip packages in `requirements.txt`:
-  - Flask, numpy, opencv-python, matplotlib
+- Python dependencies declared in `pixi.toml` (Flask, numpy, opencv-python, matplotlib, etc.) which are installed automatically whenever you run commands via Pixi (for example, `pixi run python app.py`)
 
-## Quick Start (Windows, similar on macOS/Linux)
-1) Create/activate a venv
-   - PowerShell:
-     - python -m venv .venv
-     - .venv\Scripts\Activate.ps1
-2) Install deps
-   - pip install -r requirements.txt
-3) (Optional) Choose camera
-   - set CAMERA_ID=DEV_XXXX for Allied Vision, `CAMERA_ID=basler:SERIAL` for Basler, or leave empty to auto-detect
-4) Run
-   - python app.py
-   - Open http://localhost:5000
+## Install Pixi (one time)
+- **Windows (PowerShell):**
+  ```powershell
+  iwr https://pixi.sh/install.ps1 -useb | iex
+  ```
+- **macOS / Linux (bash):**
+  ```bash
+  curl -fsSL https://pixi.sh/install.sh | bash
+  ```
+Restart the shell (or follow the on-screen instructions) so `pixi` is on your `PATH`.
+
+## Quick Start (Windows, macOS, Linux)
+1. **Create the environment**  
+   ```powershell
+   pixi install
+   ```
+   This downloads the locked dependencies into `.pixi/` (no manual `python -m venv` or `pip install` needed).
+2. **Run the web app**  
+   ```powershell
+   pixi run python app.py
+   ```
+   Pass camera-specific overrides inline when needed, e.g.  
+   `pixi run --env CAMERA_ID=DEV_XXXX python app.py` (Allied Vision) or  
+   `pixi run --env CAMERA_ID=basler:SERIAL python app.py` (Basler).  
+   Then open http://localhost:5000
 
 Firewall note (Windows): allow Python inbound for local network access.
 
@@ -42,7 +57,7 @@ Firewall note (Windows): allow Python inbound for local network access.
 - templates/index.html        UI layout (sidebar + workspace)
 - static/app.js               ROI interactions, REST, polling, save workflow
 - static/styles.css           Responsive styles
-- requirements.txt            Python deps
+- pixi.toml / pixi.lock       Dependency + task definitions (Pixi)
 - README.md                   This file
 - Examples/test_basler_connection.py Simple smoke-test for Basler cameras via pypylon
 
@@ -96,5 +111,8 @@ Firewall note (Windows): allow Python inbound for local network access.
 - Slow FPS: reduce ROI feed count, lower resolution, or increase system resources
 
 ## License
-Internal/Project use. Verify Allied Vision SDK license for deployment constraints.
+Distributed under the [MIT License](LICENSE). Copyright (c) 2025
+Tino Lang (<tino.lang@desy.de>), who serves as the creator and primary contact for this app.
+Ensure any third-party SDKs (e.g., Allied Vision, Basler Pylon) are used
+according to their respective licenses.
 
