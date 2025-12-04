@@ -41,6 +41,14 @@ except ImportError:
 
 from fake_camera import FakeCamera, FakeFrame
 
+try:
+    from basler_camera import BaslerCamera, BaslerDeviceInfo, list_basler_devices
+except ImportError:  # pragma: no cover - optional dependency
+    BaslerCamera = None
+
+    def list_basler_devices() -> List["BaslerDeviceInfo"]:
+        return []
+
 # Camera display pixel format for OpenCV/JPEG
 OPENCV_DISPLAY_FORMAT = PixelFormat.Bgr8
 _AUTO_EXPOSURE_SMOOTH_CLUSTER_MIN = 12
@@ -89,6 +97,20 @@ def _placeholder_image(text: str, size: Tuple[int, int] = (640, 480)) -> np.ndar
     return img
 
 
+def _is_frame_complete(status: object) -> bool:
+    try:
+        if status == FrameStatus.Complete:
+            return True
+    except Exception:
+        pass
+    if isinstance(status, str):
+        return status.lower() == "complete"
+    name = getattr(status, "name", None)
+    if isinstance(name, str):
+        return name.lower() == "complete"
+    return False
+
+
 def _nearest_with_increment(value: float, min_v: float, max_v: float, inc: Optional[float]) -> float:
     v = max(min_v, min(max_v, value))
     if inc and inc > 0:
@@ -111,7 +133,7 @@ class CameraService:
 
         def __call__(self, cam: Union[Camera, FakeCamera], stream: Optional[Stream], frame: Union[Frame, FakeFrame]):
             try:
-                if frame.get_status() == FrameStatus.Complete:
+                if _is_frame_complete(frame.get_status()):
                     sensor_gray = None
                     if self.service._sensor_capture_enabled_state():
                         try:
@@ -168,11 +190,10 @@ class CameraService:
                     except Exception:
                         pass
 
-                    # Notify metrics loop that a new frame is available (non-blocking)
-                    try:
-                        self.service._metrics_signal.put_nowait(1)
-                    except Exception:
-                        pass
+                    # Notify listeners that a new frame is available
+                    with self.service._frame_signal_cond:
+                        self.service._frame_signal_counter += 1
+                        self.service._frame_signal_cond.notify_all()
             finally:
                 # Re-queue the frame for next acquisition (only for real cameras)
                 if isinstance(cam, Camera) and isinstance(frame, Frame):
@@ -189,7 +210,8 @@ class CameraService:
 
         self._running = False
         self._display_queue: "Queue[np.ndarray]" = Queue(maxsize=2)
-        self._metrics_signal: "Queue[int]" = Queue(maxsize=1)
+        self._frame_signal_cond = threading.Condition()
+        self._frame_signal_counter = 0
 
         # Shared state
         self._frame_lock = threading.Lock()
@@ -626,6 +648,11 @@ class CameraService:
                     cameras.append({"id": cam.get_id(), "name": cam.get_name()})
         except Exception as e:
             self._logger.error(f"Could not list VmbPy cameras: {e}", exc_info=True)
+        try:
+            for dev in list_basler_devices():
+                cameras.append({"id": dev.id, "name": f"Basler {dev.label}"})
+        except Exception as e:
+            self._logger.error(f"Could not list Basler cameras: {e}", exc_info=True)
         return cameras
 
     def start(self, camera_id: Optional[str] = None) -> None:
@@ -649,17 +676,23 @@ class CameraService:
                     available_cams = vmb.get_all_cameras()
                     if available_cams:
                         target_camera_id = available_cams[0].get_id()
-                        self._logger.info(f"No camera specified, defaulting to first found: {target_camera_id}")
-                    else:
-                        # If no real cameras, default to fake one
-                        target_camera_id = "fake"
-                        self._logger.info("No real cameras found, defaulting to Fake Camera.")
+                        self._logger.info(f"No camera specified, defaulting to first Allied Vision camera: {target_camera_id}")
             except Exception:
-                target_camera_id = "fake"
-                self._logger.info("VmbPy not available, defaulting to Fake Camera.")
+                target_camera_id = None
 
+            if not target_camera_id:
+                basler_devices = list_basler_devices()
+                if basler_devices:
+                    choice = basler_devices[0]
+                    target_camera_id = choice.id
+                    self._logger.info(f"No Allied Vision camera found, defaulting to Basler {choice.label}.")
+                else:
+                    target_camera_id = "fake"
+                    self._logger.info("No physical cameras found, defaulting to Fake Camera.")
 
-        if target_camera_id == "fake":
+        normalized_target = (target_camera_id or "").lower()
+
+        if normalized_target == "fake":
             self._logger.info("Initializing FakeCamera...")
             cam = FakeCamera(camera_id="fake", logger=self._logger)
             self._cam = cam
@@ -668,6 +701,13 @@ class CameraService:
             self._active_camera_id = "fake"
             self._running = True
             self._logger.info("FakeCamera started.")
+            return
+
+        if normalized_target.startswith("basler"):
+            serial = None
+            if ":" in target_camera_id:
+                serial = target_camera_id.split(":", 1)[1] or None
+            self._start_basler_camera(serial)
             return
 
         # --- Real VmbPy Camera Logic ---
@@ -714,11 +754,12 @@ class CameraService:
                 self._vmb = None
 
             while not self._display_queue.empty():
-                try: self._display_queue.get_nowait()
-                except Exception: break
-            while not self._metrics_signal.empty():
-                try: self._metrics_signal.get_nowait()
-                except Exception: break
+                try:
+                    self._display_queue.get_nowait()
+                except Exception:
+                    break
+            with self._frame_signal_cond:
+                self._frame_signal_counter = 0
 
             self._running = False
             self._active_camera_id = None
@@ -729,6 +770,26 @@ class CameraService:
 
     def is_running(self) -> bool:
         return self._running
+
+    def _start_basler_camera(self, serial: Optional[str]) -> None:
+        if BaslerCamera is None:
+            raise RuntimeError("Basler support is not available (pypylon missing).")
+        self._logger.info(
+            "Initializing Basler camera%s...",
+            f" with serial {serial}" if serial else "",
+        )
+        try:
+            cam = BaslerCamera(logger=self._logger, device_serial=serial)
+            self._cam = cam
+            self._active_camera_id = cam.get_id()
+            self._cam.__enter__()
+            self._cam.start_streaming(handler=self._handler)
+            self._running = True
+            self._logger.info(f"Basler camera {self._active_camera_id} started.")
+        except Exception:
+            self._cam = None
+            self._active_camera_id = None
+            raise
 
     # ---------- Camera setup helpers (ported/extended from baseline) ----------
 
@@ -887,6 +948,83 @@ class CameraService:
             return True
         except Exception:
             return False
+
+    def _get_gain_feature(self):
+        if not self._cam:
+            return None
+        for name in ("Gain", "GainAbs", "GainRaw"):
+            try:
+                feat = self._cam.get_feature_by_name(name)
+                _ = feat.get()
+                return feat
+            except (VmbFeatureError, AttributeError):
+                continue
+            except Exception:
+                continue
+        return None
+
+    def _resolve_gain_feature(self) -> Tuple[object, float, float, Optional[float], float]:
+        feat = self._get_gain_feature()
+        if feat is None:
+            raise RuntimeError("Gain control not available on this camera.")
+        try:
+            min_v, max_v = feat.get_range()
+            min_v = float(min_v)
+            max_v = float(max_v)
+        except Exception:
+            min_v, max_v = 0.0, 0.0
+        try:
+            inc = float(feat.get_increment())
+            if not np.isfinite(inc) or inc <= 0.0:
+                inc = None
+        except Exception:
+            inc = None
+        scale = 1.0
+        if max_v and max_v > 1000.0:
+            scale = 0.01
+        elif max_v and max_v > 100.0:
+            scale = 0.1
+        return feat, min_v, max_v, inc, scale
+
+    def get_gain_info(self) -> Dict[str, float]:
+        feat, min_v, max_v, inc, scale = self._resolve_gain_feature()
+        try:
+            raw_value = float(feat.get())
+        except Exception as exc:
+            raise RuntimeError(f"Failed to read gain: {exc}")
+        value = raw_value * scale
+        info = {
+            "value": value,
+            "min": min_v * scale,
+            "max": max_v * scale if max_v else max_v,
+            "increment": (inc * scale) if inc else 0.0,
+        }
+        return info
+
+    def set_gain_db(self, requested_db: float) -> float:
+        feat, min_v, max_v, inc, scale = self._resolve_gain_feature()
+        try:
+            feat_auto = self._get_gain_auto_feature()
+            if feat_auto is not None:
+                try:
+                    feat_auto.set("Off")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        requested = float(requested_db)
+        min_scaled = min_v * scale
+        max_scaled = max_v * scale if max_v else max_v
+        inc_scaled = (inc * scale) if (inc and scale) else inc
+        target_scaled = _nearest_with_increment(requested, min_scaled, max_scaled, inc_scaled)
+        raw_target = target_scaled / scale if scale and scale != 0.0 else target_scaled
+        try:
+            feat.set(raw_target)
+            current = float(feat.get()) * scale
+        except Exception as exc:
+            raise RuntimeError(f"Failed to set gain: {exc}")
+        return current
 
     def auto_adjust_exposure(self, target_fraction: float = 0.9, tolerance: float = 0.05) -> Dict[str, object]:
         """
@@ -1313,8 +1451,13 @@ class CameraService:
     # ---------- Metrics signaling ----------
 
     def wait_for_frame_signal(self, timeout: float = 1.0) -> bool:
-        try:
-            self._metrics_signal.get(timeout=timeout)
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        with self._frame_signal_cond:
+            start = self._frame_signal_counter
+            while self._frame_signal_counter == start:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._frame_signal_cond.wait(timeout=remaining)
             return True
-        except Exception:
-            return False

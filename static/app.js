@@ -33,6 +33,9 @@
 
   const expSlider = qs('#expSlider');
   const expLabel = qs('#expLabel');
+  const gainSlider = qs('#gainSlider');
+  const gainLabel = qs('#gainLabel');
+  const gainHint = qs('#gainUnavailableHint');
   const cmSelect = qs('#colormapSelect');
 
   if (captureBackgroundBtn) captureBackgroundBtn.disabled = !cameraToggle.checked;
@@ -141,6 +144,7 @@
   let hasBackgroundFrame = false;
   let fakeCamConfig = null;
   let fakeCamBusy = false;
+  let gainControlsAvailable = false;
   // ----- REST helpers -----
   async function logToServer(level, message, data) {
     try {
@@ -183,6 +187,13 @@
     } catch(e) {
       logToServer('error', 'Failed to reset max for ROI', { roiId, error: e.toString() });
     }
+  }
+
+  function formatGainValue(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '-';
+    if (Math.abs(num) >= 10) return num.toFixed(1);
+    return num.toFixed(2);
   }
 
   function showToast(message, options = {}) {
@@ -526,6 +537,55 @@
     expSlider.disabled = shouldDisable;
   }
 
+  function updateGainDisabledState() {
+    if (!gainSlider) return;
+    const camOn = !!(cameraToggle && cameraToggle.checked);
+    gainSlider.disabled = !(gainControlsAvailable && camOn);
+  }
+
+  function setGainUnavailable(showHint = false) {
+    if (!gainSlider) return;
+    gainControlsAvailable = false;
+    gainSlider.value = gainSlider.min || '0';
+    if (gainLabel) gainLabel.textContent = '-';
+    if (gainHint) gainHint.hidden = !showHint;
+    updateGainDisabledState();
+  }
+
+  function applyGainInfo(info) {
+    if (!gainSlider) return;
+    if (!info || typeof info.value !== 'number') {
+        setGainUnavailable(false);
+        return;
+    }
+    if (typeof info.min === 'number' && Number.isFinite(info.min)) {
+      gainSlider.min = String(info.min);
+    }
+    if (typeof info.max === 'number' && Number.isFinite(info.max)) {
+      gainSlider.max = String(info.max);
+    }
+    if (typeof info.increment === 'number' && Number.isFinite(info.increment) && info.increment > 0) {
+      gainSlider.step = String(info.increment);
+    }
+    gainSlider.value = String(info.value);
+    if (gainLabel) gainLabel.textContent = formatGainValue(info.value);
+    gainControlsAvailable = true;
+    if (gainHint) gainHint.hidden = true;
+    updateGainDisabledState();
+  }
+
+  async function refreshGainControls() {
+    if (!gainSlider) return;
+    try {
+      const info = await getJSON('/gain');
+      applyGainInfo(info);
+    } catch (err) {
+      const showHint = !!(cameraToggle && cameraToggle.checked);
+      setGainUnavailable(showHint);
+      logToServer('debug', 'Gain controls unavailable', { error: err?.message || String(err) });
+    }
+  }
+
   function isFakeCameraSelected() {
     return !!(cameraSelect && cameraSelect.value === 'fake');
   }
@@ -793,6 +853,8 @@
   updateAutoExposureUI();
   updateExposureWidgetsDisabledState();
   setAutoExposureDisabled(!(cameraToggle && cameraToggle.checked));
+  setGainUnavailable(false);
+  updateGainDisabledState();
   applyFakeCameraPanelState();
 
 
@@ -2329,6 +2391,7 @@
         cmSelect.value = cm.value;
       }
     } catch (_) {}
+    await refreshGainControls();
     setAutoExposureDisabled(!cameraToggle.checked);
     applyFakeCameraPanelState();
   }
@@ -2352,6 +2415,26 @@
       }
     } catch (_) {}
   });
+
+  if (gainSlider) {
+    gainSlider.addEventListener('input', () => {
+      if (gainLabel) gainLabel.textContent = formatGainValue(parseFloat(gainSlider.value));
+    });
+    gainSlider.addEventListener('change', async () => {
+      const v = parseFloat(gainSlider.value);
+      if (!Number.isFinite(v)) return;
+      try {
+        const res = await postJSON('/gain', { value: v });
+        if (typeof res.value === 'number') {
+          gainSlider.value = String(res.value);
+          if (gainLabel) gainLabel.textContent = formatGainValue(res.value);
+        }
+      } catch (err) {
+        logToServer('error', 'Failed to set gain', { error: err?.message || String(err) });
+        await refreshGainControls();
+      }
+    });
+  }
 
   cmSelect.addEventListener('change', async () => {
     const value = cmSelect.value;
@@ -2377,6 +2460,14 @@
       if (captureBackgroundBtn) captureBackgroundBtn.disabled = !success;
       stream.src = success ? '/video_feed?ts=' + Date.now() : '';
       applyFakeCameraPanelState();
+      if (success && enabled) {
+        await refreshGainControls();
+      } else if (!enabled) {
+        setGainUnavailable(false);
+      } else if (!success) {
+        setGainUnavailable(false);
+      }
+      updateGainDisabledState();
       if (!success && res.error) {
         logToServer('error', 'Failed to toggle camera', { error: res.error });
         alert(`Error: ${res.error}`);
@@ -2388,6 +2479,7 @@
       setAutoExposureDisabled(!cameraToggle.checked);
       if (captureBackgroundBtn) captureBackgroundBtn.disabled = !cameraToggle.checked;
       applyFakeCameraPanelState();
+      updateGainDisabledState();
     }
     await refreshBackgroundStatus();
   });

@@ -13,7 +13,8 @@ Python-only, cross-platform Flask app to stream an Allied Vision camera (vmbpy),
 
 ## Requirements
 - Python 3.10+
-- vmbpy (Allied Vision SDK) installed and working (do not pip install)
+- vmbpy (Allied Vision SDK) installed and working (do not pip install) for Allied Vision cameras
+- Basler Pylon runtime + `pypylon` (installed automatically via Pixi on Windows) for Basler cameras
 - pip packages in `requirements.txt`:
   - Flask, numpy, opencv-python, matplotlib
 
@@ -25,7 +26,7 @@ Python-only, cross-platform Flask app to stream an Allied Vision camera (vmbpy),
 2) Install deps
    - pip install -r requirements.txt
 3) (Optional) Choose camera
-   - set CAMERA_ID=DEV_XXXX (or leave empty to use first camera)
+   - set CAMERA_ID=DEV_XXXX for Allied Vision, `CAMERA_ID=basler:SERIAL` for Basler, or leave empty to auto-detect
 4) Run
    - python app.py
    - Open http://localhost:5000
@@ -35,6 +36,7 @@ Firewall note (Windows): allow Python inbound for local network access.
 ## File Structure
 - app.py                      Flask app & routes
 - camera_service.py           Camera lifecycle, streaming, exposure/colormap, latest frames, MJPEG
+- basler_camera.py            Pylon/pypylon adapter mirroring the CameraService expectations
 - roi.py                      ROI dataclass + thread-safe registry (CRUD, bounds clamp)
 - metrics.py                  Per-frame ROI integration, exposure-corrected metrics, FPS
 - templates/index.html        UI layout (sidebar + workspace)
@@ -42,6 +44,12 @@ Firewall note (Windows): allow Python inbound for local network access.
 - static/styles.css           Responsive styles
 - requirements.txt            Python deps
 - README.md                   This file
+- Examples/test_basler_connection.py Simple smoke-test for Basler cameras via pypylon
+
+### Basler Cameras
+- Install Basler Pylon runtime so `pypylon` can discover cameras.
+- Use `pixi run python Examples/test_basler_connection.py` to verify connectivity before starting the web app.
+- Select the desired Basler device from the UI camera selector (entries look like `Basler <model> (<serial>)`) or set `CAMERA_ID=basler:<serial>` in the environment.
 
 ## Endpoints (Server)
 - GET /                       UI

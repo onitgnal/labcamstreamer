@@ -745,6 +745,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2c/e1/e6716421ea10d38022b952c159d5161ca1193197fb744506875fbb87ea7b/iniconfig-2.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c7/21/705964c7812476f378728bdf590ca4b771ec72385c533964653c68e86bdc/pygments-2.19.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/9e/85/fb75dafe3ad1b928930efb753c97aec79efe74fbdc1a590516e5e96e01ca/pypylon-4.2.0-cp39-abi3-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/a8/a4/20da314d277121d6534b3a980b29035dcd51e6744bd79075a6ce8fa4eb8d/pytest-8.4.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/08/01/2b013f556cfbe2f06979371ed9b79eebda05dc9a6571c00b06e5ea6ad8ce/vmbpy-1.1.1-py3-none-win_amd64.whl
 packages:
@@ -8147,6 +8148,10 @@ packages:
   - pkg:pypi/pyparsing?source=compressed-mapping
   size: 104044
   timestamp: 1758436411254
+- pypi: https://files.pythonhosted.org/packages/9e/85/fb75dafe3ad1b928930efb753c97aec79efe74fbdc1a590516e5e96e01ca/pypylon-4.2.0-cp39-abi3-win_amd64.whl
+  name: pypylon
+  version: 4.2.0
+  sha256: a7a13978f1a8e352b9cecc1334eef06e0bb0262e58dfa4de9bc317c5b8afaf1d
 - conda: https://conda.anaconda.org/conda-forge/linux-64/pyside6-6.9.3-py313h85046ba_1.conda
   sha256: 8d143b89d075b39fa25e69ad9be2396f4b591a205f95b2bf5a81a14cd397c56f
   md5: bb7ac52bfa917611096023598a7df152

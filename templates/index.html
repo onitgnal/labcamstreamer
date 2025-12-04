@@ -46,6 +46,15 @@
           </div>
         </section>
 
+        <section class="panel">
+          <h2>Gain (dB)</h2>
+          <div class="row space">
+            <input id="gainSlider" type="range" min="0" max="24" step="0.1" disabled />
+            <span id="gainLabel" class="mono">-</span>
+          </div>
+          <p id="gainUnavailableHint" class="hint" hidden>Gain control is unavailable for this camera.</p>
+        </section>
+
         <section id="fakeCamPanel" class="panel" hidden>
           <h2>Fake Camera</h2>
           <p class="hint">Adjust the synthetic beam to exercise auto exposure.</p>

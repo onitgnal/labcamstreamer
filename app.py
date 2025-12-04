@@ -1530,6 +1530,31 @@ def exposure():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/gain", methods=["GET", "POST"])
+def gain():
+    if request.method == "GET":
+        try:
+            info = cam_service.get_gain_info()
+            return jsonify(info)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 409
+        except Exception as exc:
+            app.logger.error(f"Gain query failed: {exc}", exc_info=True)
+            return jsonify({"error": str(exc)}), 500
+    try:
+        data = request.get_json(silent=True) or {}
+        req_val = float(data.get("value"))
+    except Exception:
+        return jsonify({"error": "Invalid value"}), 400
+    try:
+        applied = cam_service.set_gain_db(req_val)
+        return jsonify({"value": float(applied)})
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+    except Exception as exc:
+        app.logger.error(f"Gain update failed: {exc}", exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
 @app.route("/exposure/auto", methods=["POST"])
 def exposure_auto():
     data = request.get_json(silent=True) or {}
@@ -1740,6 +1765,7 @@ def camera_toggle():
     enabled = bool(data.get("enabled", False))
     camera_id = data.get("camera_id")
     err = None
+    enabled_response = False
     try:
         if enabled:
             app.logger.info(f"Camera START requested for ID: {camera_id}")
@@ -1747,10 +1773,14 @@ def camera_toggle():
         else:
             app.logger.info("Camera STOP requested.")
             cam_service.stop()
+        enabled_response = cam_service.is_running()
     except Exception as e:
         err = str(e)
+        enabled_response = cam_service.is_running()
+        status = 409 if "controlled by another application" in err.lower() else 500
         app.logger.error(f"Failed to toggle camera: {e}", exc_info=True)
-    return jsonify({"enabled": cam_service.is_running(), "error": err})
+        return jsonify({"enabled": enabled_response, "error": err}), status
+    return jsonify({"enabled": enabled_response, "error": err})
 
 # ROI CRUD
 @app.route("/rois", methods=["GET", "POST"])
