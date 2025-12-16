@@ -351,6 +351,28 @@
     }
   }
 
+  function summarizeImportCounts(counts = {}) {
+    const imported = Number(counts.imported || 0);
+    const duplicates = Number(counts.duplicates || 0);
+    const malformed = Number(counts.malformed || 0);
+    const ioErrors = Number(counts.io_errors || 0);
+    const skipped = duplicates + malformed + ioErrors;
+    const total = imported + skipped;
+    let message = `${imported} image${imported === 1 ? '' : 's'} imported`;
+    if (skipped > 0) {
+      message += `, ${skipped} skipped`;
+    }
+    return {
+      imported,
+      duplicates,
+      malformed,
+      ioErrors,
+      skipped,
+      total,
+      message,
+    };
+  }
+
   function updateCausticImportProgress(snapshot) {
     if (!causticImportProgress) return;
     causticImportProgress.hidden = false;
@@ -358,42 +380,36 @@
     const total = Number(snapshot?.total_files ?? snapshot?.total ?? 0) || 0;
     const processed = Number(snapshot?.processed_files ?? snapshot?.processed ?? 0) || 0;
     const counts = snapshot?.counts || {};
-    const imported = Number(counts.imported || 0);
-    const duplicates = Number(counts.duplicates || 0);
-    const malformed = Number(counts.malformed || 0);
-    const ioErrors = Number(counts.io_errors || 0);
-    const skipped = duplicates + malformed + ioErrors;
+    const summary = summarizeImportCounts(counts);
 
     let percent = 0;
-    if (status === 'completed') {
-      const total = Number(snapshot?.total_files ?? snapshot?.total ?? 0) || 0;
-      if (snapshot?.caustic_state) {
-        applyCausticState(snapshot.caustic_state);
-      } else {
-        refreshCausticState().catch(() => {});
-      }
-      if (total === 0) {
-        showToast('No BMP files found in the selected folder.', { variant: 'info', duration: 5000 });
-      } else {
-        const variant = summary.imported > 0 ? 'success' : 'info';
-        showToast(summary.message, { variant, duration: 6000 });
-      }
-    } else if (status === 'failed') {
-      const reason = snapshot?.error || 'Import failed';
-      showToast(reason, { variant: 'error', duration: 7000 });
+    if (total > 0) {
+      percent = Math.max(0, Math.min(100, (processed / total) * 100));
+    }
+    if (status === 'completed' || status === 'failed') {
+      percent = 100;
+    }
+    if (causticImportProgressFill) {
+      causticImportProgressFill.style.width = `${percent}%`;
     }
 
-    causticImportActive = false;
-    setCausticImportBusy(false);
-
-    if (snapshot?.skipped?.length) {
-      console.info('Caustic import skipped files:', snapshot.skipped);
+    if (causticImportProgressText) {
+      let text = 'Processing...';
+      if (status === 'queued') {
+        text = 'Queued...';
+      } else if (status === 'running') {
+        if (total > 0) {
+          text = `Processing ${processed}/${total}`;
+        } else if (processed > 0) {
+          text = `Processing ${processed}`;
+        }
+      } else if (status === 'completed') {
+        text = summary.message;
+      } else if (status === 'failed') {
+        text = snapshot?.error || 'Import failed';
+      }
+      causticImportProgressText.textContent = text;
     }
-
-    setTimeout(() => {
-      resetCausticImportModal();
-      closeCausticImportModal();
-    }, 200);
   }
 
   function finalizeCausticImport(snapshot) {
@@ -430,6 +446,40 @@
     }, 200);
     causticImportTask = null;
     scheduleCausticRefreshPoke();
+  }
+
+  async function pollCausticImport(taskId) {
+    if (!taskId) return;
+    try {
+      const res = await fetch(`/api/caustic/import/${encodeURIComponent(taskId)}`);
+      if (!res.ok) {
+        let message = res.statusText || 'Failed to fetch import status';
+        try {
+          const errData = await res.json();
+          if (errData?.error) message = errData.error;
+        } catch (_) {
+          try {
+            message = await res.text();
+          } catch (__){ /* ignore */ }
+        }
+        throw new Error(message);
+      }
+      const snapshot = await res.json();
+      causticImportTask = snapshot;
+      updateCausticImportProgress(snapshot);
+      const status = (snapshot?.status || '').toLowerCase();
+      if (status === 'completed' || status === 'failed') {
+        finalizeCausticImport(snapshot);
+        return;
+      }
+      causticImportPollTimer = setTimeout(() => pollCausticImport(taskId), 1000);
+    } catch (error) {
+      stopCausticImportPolling();
+      causticImportActive = false;
+      setCausticImportBusy(false);
+      if (causticImportProgress) causticImportProgress.hidden = true;
+      showToast(`Import status failed: ${parseServerError(error)}`, { variant: 'error' });
+    }
   }
 
   function scheduleCausticRefreshPoke() {

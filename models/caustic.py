@@ -81,7 +81,7 @@ class CausticFilenameError(ValueError):
 
 
 _CAUSTIC_FILENAME_PATTERN = re.compile(
-    r"pixelsize_(?P<pix>[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)_m_pos_(?P<z>[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)_mm\.bmp$",
+    r"pixelsize_(?P<pix>[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)_m_pos_(?P<z>[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)_(?P<unit>mm|cm|m)\.bmp$",
     re.IGNORECASE,
 )
 
@@ -89,7 +89,7 @@ _CAUSTIC_FILENAME_PATTERN = re.compile(
 def parse_caustic_filename(path: str) -> Tuple[float, float]:
     """
     Parse a stored caustic BMP filename and extract the pixel size (meters/pixel)
-    and z-position in millimetres.
+    and z-position, supporting z units of m, cm, or mm.
 
     Parameters
     ----------
@@ -99,7 +99,7 @@ def parse_caustic_filename(path: str) -> Tuple[float, float]:
     Returns
     -------
     tuple
-        (pixel_size_m, z_mm)
+        (pixel_size_m, z_mm) where z is always returned in millimetres.
 
     Raises
     ------
@@ -110,23 +110,37 @@ def parse_caustic_filename(path: str) -> Tuple[float, float]:
     name = str(Path(path).name)
     match = _CAUSTIC_FILENAME_PATTERN.search(name)
     if not match:
-        raise CausticFilenameError(f"Filename does not match caustic pattern: {name}")
+        raise CausticFilenameError(
+            "Filename does not match caustic pattern "
+            "(expected ...pixelsize_<m_per_px>_m_pos_<z>_{m|cm|mm}.bmp): "
+            f"{name}"
+        )
 
     pix_str = match.group("pix")
     z_str = match.group("z")
+    unit_str = (match.group("unit") or "mm").lower()
     try:
         pixel_size = float(pix_str)
     except (TypeError, ValueError) as exc:
         raise CausticFilenameError(f"Invalid pixel size value in filename: {name}") from exc
     try:
-        z_mm = float(z_str)
+        z_value = float(z_str)
     except (TypeError, ValueError) as exc:
         raise CausticFilenameError(f"Invalid z position value in filename: {name}") from exc
 
     if not math.isfinite(pixel_size) or pixel_size <= 0.0:
         raise CausticFilenameError(f"Pixel size must be positive in filename: {name}")
-    if not math.isfinite(z_mm):
+    if not math.isfinite(z_value):
         raise CausticFilenameError(f"Z position must be finite in filename: {name}")
+
+    if unit_str == "mm":
+        z_mm = z_value
+    elif unit_str == "cm":
+        z_mm = z_value * 10.0
+    elif unit_str == "m":
+        z_mm = z_value * 1e3
+    else:
+        raise CausticFilenameError(f"Unsupported z unit in filename: {name}")
 
     return pixel_size, z_mm
 
@@ -488,8 +502,15 @@ class CausticManager:
         }
         (target_dir / "caustic_meta.json").write_text(json.dumps(meta, indent=2))
 
+        z_unit = str(config.get("position_unit") or "m")
         csv_lines = [
-            "timestamp_iso,roi_id,z,wavelength_nm,wx_1e2,wy_1e2,wx_2sigma,wy_2sigma,profile_img,cut_x_img,cut_y_img,raw_roi_img"
+            (
+                "timestamp_iso,roi_id,"
+                f"z [{z_unit}],"
+                "wavelength_nm,"
+                "wx_1e2 [px],wy_1e2 [px],wx_2sigma [px],wy_2sigma [px],"
+                "profile_img,cut_x_img,cut_y_img,raw_roi_img"
+            )
         ]
 
         for idx, pt in enumerate(points, start=1):
@@ -575,4 +596,3 @@ class CausticManager:
             self.export_dataset(target, clean=True)
         except Exception:
             pass
-
